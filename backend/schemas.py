@@ -47,12 +47,20 @@ class RuleEngineViolation(BaseModel):
     timestamp: float | None = Field(default=None, ge=0)
 
 
+class TrackedObject(BaseModel):
+    id: int
+    class_name: str = Field(serialization_alias="class")
+    bbox: tuple[float, float, float, float]
+    confidence: float = Field(ge=0, le=1)
+
+
 class AnalysisResponse(BaseModel):
     file_name: str
     is_video: bool
     duration_seconds: float | None = Field(default=None, ge=0)
     violations: list[Violation]
     rule_engine_violations: list[RuleEngineViolation] | None = None
+    tracked_objects: list[TrackedObject] | None = None
     summary: AnalysisSummary
 
 
@@ -67,6 +75,7 @@ class FrameDetections(BaseModel):
     frame_index: int = Field(ge=0)
     timestamp: float = Field(ge=0)
     detections: list[RawDetection]
+    tracked_objects: list[TrackedObject] | None = None
 
 
 class DebugAnalysisResponse(AnalysisResponse):

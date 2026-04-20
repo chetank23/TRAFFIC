@@ -63,13 +63,24 @@ async def _validate_and_store_upload(file: UploadFile) -> tuple[str, str]:
 async def upload_media(
     file: UploadFile = File(...),
     include_rule_engine: bool = Query(default=False),
+    include_tracking: bool = Query(default=False),
 ) -> AnalysisResponse:
     temp_path, original_name = await _validate_and_store_upload(file)
 
     try:
         if is_video_file(original_name):
-            return process_video(temp_path, original_name, include_rule_engine=include_rule_engine)
-        return process_image(temp_path, original_name, include_rule_engine=include_rule_engine)
+            return process_video(
+                temp_path,
+                original_name,
+                include_rule_engine=include_rule_engine,
+                include_tracking=include_tracking,
+            )
+        return process_image(
+            temp_path,
+            original_name,
+            include_rule_engine=include_rule_engine,
+            include_tracking=include_tracking,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -85,13 +96,24 @@ async def upload_media(
 async def upload_media_debug(
     file: UploadFile = File(...),
     include_rule_engine: bool = Query(default=False),
+    include_tracking: bool = Query(default=False),
 ) -> DebugAnalysisResponse:
     temp_path, original_name = await _validate_and_store_upload(file)
 
     try:
         if is_video_file(original_name):
-            return process_video_debug(temp_path, original_name, include_rule_engine=include_rule_engine)
-        return process_image_debug(temp_path, original_name, include_rule_engine=include_rule_engine)
+            return process_video_debug(
+                temp_path,
+                original_name,
+                include_rule_engine=include_rule_engine,
+                include_tracking=include_tracking,
+            )
+        return process_image_debug(
+            temp_path,
+            original_name,
+            include_rule_engine=include_rule_engine,
+            include_tracking=include_tracking,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

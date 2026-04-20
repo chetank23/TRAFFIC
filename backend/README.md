@@ -15,6 +15,26 @@ POST /upload?include_rule_engine=true
 POST /upload/debug?include_rule_engine=true
 ```
 
+Enable DeepSORT tracking output with persistent IDs by adding `include_tracking=true`:
+
+```bash
+POST /upload?include_tracking=true
+POST /upload/debug?include_tracking=true
+```
+
+Tracking output format:
+
+```json
+[
+	{
+		"id": 17,
+		"class": "car",
+		"bbox": [120.0, 220.0, 360.0, 420.0],
+		"confidence": 0.92
+	}
+]
+```
+
 ## Setup
 
 ```bash

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import cv2
 
-from detector import Detection, detect_objects
+from detector import Detection, TrackedObject as DetectorTrackedObject, detect_objects, reset_tracker, track_objects
 from schemas import (
     AnalysisResponse,
     AnalysisSummary,
@@ -14,6 +14,7 @@ from schemas import (
     FrameDetections,
     RawDetection,
     RuleEngineViolation,
+    TrackedObject,
 )
 from violation_detector import ViolationDetector
 from violations import FrameContext, detect_violations
@@ -103,7 +104,29 @@ def _to_rule_engine_violations(
     return converted
 
 
-def process_image(path: str, file_name: str, include_rule_engine: bool = False) -> AnalysisResponse:
+def _to_tracked_objects(tracks: list[DetectorTrackedObject]) -> list[TrackedObject]:
+    return [
+        TrackedObject(
+            id=t.track_id,
+            class_name=t.class_name,
+            bbox=(
+                float(t.box_xyxy[0]),
+                float(t.box_xyxy[1]),
+                float(t.box_xyxy[2]),
+                float(t.box_xyxy[3]),
+            ),
+            confidence=float(t.confidence),
+        )
+        for t in tracks
+    ]
+
+
+def process_image(
+    path: str,
+    file_name: str,
+    include_rule_engine: bool = False,
+    include_tracking: bool = False,
+) -> AnalysisResponse:
     image = cv2.imread(path)
     if image is None:
         raise ValueError("Unable to read image file")
@@ -111,6 +134,11 @@ def process_image(path: str, file_name: str, include_rule_engine: bool = False) 
     h, w = image.shape[:2]
     detections = detect_objects(image)
     rule_engine_violations: list[RuleEngineViolation] | None = None
+    tracked_objects: list[TrackedObject] | None = None
+
+    if include_tracking:
+        reset_tracker()
+        tracked_objects = _to_tracked_objects(track_objects(image, detections))
 
     if include_rule_engine:
         rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO)
@@ -139,11 +167,17 @@ def process_image(path: str, file_name: str, include_rule_engine: bool = False) 
         duration_seconds=None,
         violations=violations,
         rule_engine_violations=rule_engine_violations,
+        tracked_objects=tracked_objects,
         summary=summary,
     )
 
 
-def process_image_debug(path: str, file_name: str, include_rule_engine: bool = False) -> DebugAnalysisResponse:
+def process_image_debug(
+    path: str,
+    file_name: str,
+    include_rule_engine: bool = False,
+    include_tracking: bool = False,
+) -> DebugAnalysisResponse:
     image = cv2.imread(path)
     if image is None:
         raise ValueError("Unable to read image file")
@@ -151,6 +185,11 @@ def process_image_debug(path: str, file_name: str, include_rule_engine: bool = F
     h, w = image.shape[:2]
     detections = detect_objects(image)
     rule_engine_violations: list[RuleEngineViolation] | None = None
+    tracked_objects: list[TrackedObject] | None = None
+
+    if include_tracking:
+        reset_tracker()
+        tracked_objects = _to_tracked_objects(track_objects(image, detections))
 
     if include_rule_engine:
         rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO)
@@ -179,18 +218,25 @@ def process_image_debug(path: str, file_name: str, include_rule_engine: bool = F
         duration_seconds=None,
         violations=violations,
         rule_engine_violations=rule_engine_violations,
+        tracked_objects=tracked_objects,
         summary=summary,
         frame_detections=[
             FrameDetections(
                 frame_index=0,
                 timestamp=0,
                 detections=_to_raw_detections(detections, w, h),
+                tracked_objects=tracked_objects,
             )
         ],
     )
 
 
-def process_video(path: str, file_name: str, include_rule_engine: bool = False) -> AnalysisResponse:
+def process_video(
+    path: str,
+    file_name: str,
+    include_rule_engine: bool = False,
+    include_tracking: bool = False,
+) -> AnalysisResponse:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("Unable to open video file")
@@ -203,11 +249,16 @@ def process_video(path: str, file_name: str, include_rule_engine: bool = False) 
     duration = frame_count / fps if frame_count > 0 else None
 
     frame_index = 0
-    stride = max(1, int(round(fps / 5.0)))  # sample around 5 frames per second
+    stride = 1 if include_tracking else max(1, int(round(fps / 5.0)))  # track per frame when enabled
 
     violations = []
     rule_engine_violations: list[RuleEngineViolation] | None = [] if include_rule_engine else None
     rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO) if include_rule_engine else None
+    tracked_objects: list[TrackedObject] | None = [] if include_tracking else None
+
+    if include_tracking:
+        reset_tracker()
+
     previous_vehicle_centers: dict[str, tuple[float, float]] = {}
 
     while cap.isOpened():
@@ -221,6 +272,10 @@ def process_video(path: str, file_name: str, include_rule_engine: bool = False) 
 
         h, w = frame.shape[:2]
         detections = detect_objects(frame)
+
+        if tracked_objects is not None:
+            frame_tracks = _to_tracked_objects(track_objects(frame, detections))
+            tracked_objects = frame_tracks
 
         if rule_detector is not None and rule_engine_violations is not None:
             frame_rule_violations = rule_detector.detect_violations(detections, frame)
@@ -272,11 +327,17 @@ def process_video(path: str, file_name: str, include_rule_engine: bool = False) 
         duration_seconds=duration,
         violations=violations,
         rule_engine_violations=rule_engine_violations,
+        tracked_objects=tracked_objects,
         summary=summary,
     )
 
 
-def process_video_debug(path: str, file_name: str, include_rule_engine: bool = False) -> DebugAnalysisResponse:
+def process_video_debug(
+    path: str,
+    file_name: str,
+    include_rule_engine: bool = False,
+    include_tracking: bool = False,
+) -> DebugAnalysisResponse:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("Unable to open video file")
@@ -289,11 +350,16 @@ def process_video_debug(path: str, file_name: str, include_rule_engine: bool = F
     duration = frame_count / fps if frame_count > 0 else None
 
     frame_index = 0
-    stride = max(1, int(round(fps / 5.0)))
+    stride = 1 if include_tracking else max(1, int(round(fps / 5.0)))
 
     violations = []
     rule_engine_violations: list[RuleEngineViolation] | None = [] if include_rule_engine else None
     rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO) if include_rule_engine else None
+    tracked_objects: list[TrackedObject] | None = [] if include_tracking else None
+
+    if include_tracking:
+        reset_tracker()
+
     previous_vehicle_centers: dict[str, tuple[float, float]] = {}
     frame_detections: list[FrameDetections] = []
 
@@ -309,6 +375,11 @@ def process_video_debug(path: str, file_name: str, include_rule_engine: bool = F
         h, w = frame.shape[:2]
         detections = detect_objects(frame)
 
+        frame_tracks: list[TrackedObject] | None = None
+        if include_tracking:
+            frame_tracks = _to_tracked_objects(track_objects(frame, detections))
+            tracked_objects = frame_tracks
+
         if rule_detector is not None and rule_engine_violations is not None:
             frame_rule_violations = rule_detector.detect_violations(detections, frame)
             rule_engine_violations.extend(
@@ -321,6 +392,7 @@ def process_video_debug(path: str, file_name: str, include_rule_engine: bool = F
                     frame_index=frame_index,
                     timestamp=frame_index / fps,
                     detections=_to_raw_detections(detections, w, h),
+                    tracked_objects=frame_tracks,
                 )
             )
 
@@ -361,6 +433,7 @@ def process_video_debug(path: str, file_name: str, include_rule_engine: bool = F
         duration_seconds=duration,
         violations=violations,
         rule_engine_violations=rule_engine_violations,
+        tracked_objects=tracked_objects,
         summary=summary,
         frame_detections=frame_detections,
     )
