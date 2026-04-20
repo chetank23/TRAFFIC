@@ -3,25 +3,26 @@ import { useCallback, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { UploadCloud, FileVideo, FileImage, X, Play, Sparkles } from "lucide-react";
 import { Navbar } from "@/components/Navbar";
-import { runDetection } from "@/lib/detection";
+import { analyzeUpload } from "@/lib/api";
 import { setSession } from "@/lib/session";
 
 interface UploadSearch {
   kind?: "image" | "video";
-  demo?: boolean;
 }
 
 export const Route = createFileRoute("/upload")({
   validateSearch: (s: Record<string, unknown>): UploadSearch => ({
     kind: s.kind === "image" || s.kind === "video" ? s.kind : undefined,
-    demo: s.demo === true || s.demo === "true",
   }),
   head: () => ({
     meta: [
       { title: "Upload — Sentry Traffic AI" },
       { name: "description", content: "Drop an image or video to analyse traffic violations." },
       { property: "og:title", content: "Upload — Sentry Traffic AI" },
-      { property: "og:description", content: "Drop an image or video to analyse traffic violations." },
+      {
+        property: "og:description",
+        content: "Drop an image or video to analyse traffic violations.",
+      },
     ],
   }),
   component: UploadPage,
@@ -68,7 +69,7 @@ function UploadPage() {
       const f = e.dataTransfer.files?.[0];
       if (f) handleFile(f);
     },
-    [handleFile]
+    [handleFile],
   );
 
   const reset = () => {
@@ -84,44 +85,43 @@ function UploadPage() {
     setIsProcessing(true);
     setProgress(0);
 
-    const isVideo = file.type.startsWith("video/");
-    let durationSeconds: number | undefined;
-    if (isVideo) {
-      durationSeconds = await new Promise<number>((resolve) => {
-        const v = document.createElement("video");
-        v.preload = "metadata";
-        v.onloadedmetadata = () => resolve(isFinite(v.duration) ? v.duration : 12);
-        v.onerror = () => resolve(12);
-        v.src = previewUrl;
+    const timer = setInterval(() => {
+      setProgress((current) => {
+        if (current >= 90) return current;
+        return Math.min(90, current + Math.max(3, Math.round(Math.random() * 10)));
       });
+    }, 220);
+
+    try {
+      const result = await analyzeUpload(file);
+      setProgress(98);
+
+      setSession({
+        fileName: result.fileName,
+        fileUrl: previewUrl,
+        isVideo: result.isVideo,
+        durationSeconds: result.durationSeconds,
+        violations: result.violations,
+      });
+
+      setProgress(100);
+      await new Promise((r) => setTimeout(r, 180));
+      navigate({ to: "/results" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to process this file right now.";
+      setError(message);
+      setIsProcessing(false);
+    } finally {
+      clearInterval(timer);
     }
-
-    // Simulated progress
-    const steps = [12, 28, 47, 68, 84, 96, 100];
-    for (const p of steps) {
-      await new Promise((r) => setTimeout(r, 280 + Math.random() * 220));
-      setProgress(p);
-    }
-
-    const violations = runDetection({
-      fileName: file.name,
-      isVideo,
-      durationSeconds,
-    });
-
-    setSession({
-      fileName: file.name,
-      fileUrl: previewUrl,
-      isVideo,
-      durationSeconds,
-      violations,
-    });
-
-    await new Promise((r) => setTimeout(r, 250));
-    navigate({ to: "/results" });
   };
 
-  const accept = search.kind === "image" ? ACCEPT_IMAGE : search.kind === "video" ? ACCEPT_VIDEO : `${ACCEPT_IMAGE},${ACCEPT_VIDEO}`;
+  const accept =
+    search.kind === "image"
+      ? ACCEPT_IMAGE
+      : search.kind === "video"
+        ? ACCEPT_VIDEO
+        : `${ACCEPT_IMAGE},${ACCEPT_VIDEO}`;
 
   return (
     <div className="min-h-screen bg-background">
@@ -187,7 +187,8 @@ function UploadPage() {
                     {isDragging ? "Drop to upload" : "Drag & drop your file"}
                   </p>
                   <p className="mt-2 text-sm text-muted-foreground">
-                    or <span className="text-foreground underline underline-offset-4">browse</span> from your device
+                    or <span className="text-foreground underline underline-offset-4">browse</span>{" "}
+                    from your device
                   </p>
                   <div className="mt-8 flex items-center gap-2 text-xs font-mono text-muted-foreground">
                     <FileImage className="h-3.5 w-3.5" /> JPG · PNG · WEBP
@@ -253,42 +254,12 @@ function UploadPage() {
               </motion.div>
             )}
 
-            {/* Demo CTA */}
             {!file && (
-              <div className="mt-8 flex items-center justify-between rounded-2xl bg-surface border border-border px-5 py-4">
-                <div className="flex items-center gap-3">
-                  <Sparkles className="h-4 w-4 text-violation" />
-                  <div>
-                    <p className="text-sm font-medium">Don't have a file?</p>
-                    <p className="text-xs text-muted-foreground">Run a sample CCTV scan instantly.</p>
-                  </div>
-                </div>
-                <button
-                  onClick={async () => {
-                    setIsProcessing(true);
-                    const steps = [22, 48, 74, 100];
-                    for (const p of steps) {
-                      await new Promise((r) => setTimeout(r, 320));
-                      setProgress(p);
-                    }
-                    const violations = runDetection({
-                      fileName: "demo-intersection-07.mp4",
-                      isVideo: true,
-                      durationSeconds: 24,
-                    });
-                    setSession({
-                      fileName: "demo-intersection-07.mp4",
-                      fileUrl: "",
-                      isVideo: true,
-                      durationSeconds: 24,
-                      violations,
-                    });
-                    navigate({ to: "/results" });
-                  }}
-                  className="text-sm font-medium hover:underline underline-offset-4"
-                >
-                  Run demo →
-                </button>
+              <div className="mt-8 flex items-center gap-3 rounded-2xl bg-surface border border-border px-5 py-4">
+                <Sparkles className="h-4 w-4 text-violation" />
+                <p className="text-xs text-muted-foreground">
+                  Backend-connected analysis is enabled. Upload real media to generate live results.
+                </p>
               </div>
             )}
           </motion.main>
@@ -328,12 +299,8 @@ function ProcessingState({ progress, fileName }: { progress: number; fileName: s
           </div>
         </div>
 
-        <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground mb-3">
-          Analysing
-        </p>
-        <h1 className="text-3xl sm:text-4xl font-semibold tracking-[-0.03em]">
-          {messages[idx]}…
-        </h1>
+        <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground mb-3">Analysing</p>
+        <h1 className="text-3xl sm:text-4xl font-semibold tracking-[-0.03em]">{messages[idx]}…</h1>
         <p className="mt-3 text-sm text-muted-foreground font-mono truncate">{fileName}</p>
 
         <div className="mt-12 h-1 w-full rounded-full bg-border overflow-hidden">

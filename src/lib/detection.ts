@@ -1,13 +1,15 @@
-// Simulated AI detection engine — produces realistic violations with
-// bounding boxes, timestamps and confidence scores for any uploaded file.
-
 export type ViolationType =
   | "no_helmet"
   | "no_seatbelt"
   | "red_light"
   | "wrong_lane"
   | "mobile_usage"
-  | "overspeeding";
+  | "overspeeding"
+  | "drunk_driving"
+  | "no_valid_license"
+  | "triple_riding"
+  | "no_parking"
+  | "dangerous_driving";
 
 export interface Violation {
   id: string;
@@ -20,83 +22,37 @@ export interface Violation {
   vehicleId?: string;
 }
 
-export const VIOLATION_META: Record<
-  ViolationType,
-  { label: string; description: string }
-> = {
-  no_helmet: { label: "No Helmet", description: "Two-wheeler rider without helmet" },
-  no_seatbelt: { label: "No Seatbelt", description: "Driver without seatbelt" },
-  red_light: { label: "Red Light Violation", description: "Vehicle crossed on red signal" },
-  wrong_lane: { label: "Wrong Lane", description: "Vehicle driving in wrong lane" },
-  mobile_usage: { label: "Mobile Phone Usage", description: "Driver using phone" },
-  overspeeding: { label: "Overspeeding", description: "Exceeded speed limit" },
+export const VIOLATION_META: Record<ViolationType, { label: string; description: string }> = {
+  no_helmet: {
+    label: "No Helmet",
+    description: "No helmet / pillion without helmet (Rs 500 - Rs 1,000)",
+  },
+  no_seatbelt: { label: "No Seatbelt", description: "Seatbelt non-compliance (~Rs 1,000)" },
+  red_light: { label: "Red Light Violation", description: "Jumping red light (~Rs 1,000)" },
+  wrong_lane: { label: "Wrong Lane", description: "Wrong-lane driving pattern" },
+  mobile_usage: {
+    label: "Mobile Phone Usage",
+    description: "Phone use while driving (Rs 1,000 - Rs 5,000+)",
+  },
+  overspeeding: { label: "Overspeeding", description: "Overspeeding (Rs 1,000 - Rs 2,000)" },
+  drunk_driving: {
+    label: "Drunk Driving",
+    description: "Drink and drive cue (Rs 10,000+ / possible jail)",
+  },
+  no_valid_license: {
+    label: "No Valid License",
+    description: "Driving without valid license (Rs 1,000 - Rs 5,000)",
+  },
+  triple_riding: { label: "Triple Riding", description: "3+ persons on a two-wheeler (Rs 500)" },
+  no_parking: {
+    label: "No Parking / Obstruction",
+    description: "No-parking or middle-road obstruction (Rs 1,000 - Rs 2,000)",
+  },
+  dangerous_driving: {
+    label: "Dangerous Driving / Racing",
+    description: "Rash driving or racing behavior (Rs 5,000 - Rs 10,000)",
+  },
 };
-
-// Deterministic pseudo-random based on filename so repeat uploads match.
-function hashSeed(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0) / 0xffffffff;
-}
-
-function rng(seed: number) {
-  let s = seed * 1e9;
-  return () => {
-    s = (s * 9301 + 49297) % 233280;
-    return s / 233280;
-  };
-}
-
-const TYPES: ViolationType[] = [
-  "no_helmet",
-  "no_seatbelt",
-  "red_light",
-  "wrong_lane",
-  "mobile_usage",
-  "overspeeding",
-];
-
-export interface DetectionInput {
-  fileName: string;
-  isVideo: boolean;
-  durationSeconds?: number;
-}
-
-export function runDetection({
-  fileName,
-  isVideo,
-  durationSeconds = 12,
-}: DetectionInput): Violation[] {
-  const seed = hashSeed(fileName || "demo");
-  const rand = rng(seed);
-
-  const count = isVideo ? 4 + Math.floor(rand() * 5) : 1 + Math.floor(rand() * 3);
-  const violations: Violation[] = [];
-
-  for (let i = 0; i < count; i++) {
-    const type = TYPES[Math.floor(rand() * TYPES.length)];
-    const w = 0.12 + rand() * 0.18;
-    const h = 0.18 + rand() * 0.22;
-    const x = 0.05 + rand() * (0.9 - w);
-    const y = 0.1 + rand() * (0.75 - h);
-    violations.push({
-      id: `v-${i}-${Math.floor(rand() * 1e6)}`,
-      type,
-      label: VIOLATION_META[type].label,
-      confidence: 0.72 + rand() * 0.27,
-      timestamp: isVideo ? Number((rand() * durationSeconds).toFixed(1)) : undefined,
-      box: { x, y, w, h },
-      vehicleId: `VH-${Math.floor(rand() * 9000 + 1000)}`,
-    });
-  }
-
-  return violations.sort((a, b) =>
-    isVideo ? (a.timestamp ?? 0) - (b.timestamp ?? 0) : b.confidence - a.confidence
-  );
-}
 
 export function formatTimestamp(t?: number): string {
   if (t == null) return "—";

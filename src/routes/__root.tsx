@@ -29,14 +29,20 @@ export const Route = createRootRoute({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "Sentry — Traffic Violation Detection" },
+      {
+        name: "description",
+        content: "AI-assisted traffic violation detection for uploaded image and video evidence.",
+      },
+      { name: "author", content: "Sentry" },
+      { property: "og:title", content: "Sentry — Traffic Violation Detection" },
+      {
+        property: "og:description",
+        content: "Upload media, detect violations, and review timestamped evidence.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
-      { name: "twitter:site", content: "@Lovable" },
+      { name: "twitter:site", content: "@sentry_traffic_ai" },
     ],
     links: [
       {

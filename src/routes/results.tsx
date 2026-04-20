@@ -28,6 +28,8 @@ export const Route = createFileRoute("/results")({
 });
 
 type SortKey = "confidence" | "time";
+const MIN_CONFIDENCE = 0.8;
+const MAX_OVERLAY_BOXES = 18;
 
 function ResultsPage() {
   const navigate = useNavigate();
@@ -45,11 +47,32 @@ function ResultsPage() {
   const filtered = useMemo(() => {
     if (!session) return [];
     let v = [...session.violations];
+    v = v.filter((x) => x.confidence >= MIN_CONFIDENCE);
     if (filterTypes.size > 0) v = v.filter((x) => filterTypes.has(x.type));
     if (sortKey === "confidence") v.sort((a, b) => b.confidence - a.confidence);
     else v.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
     return v;
   }, [session, filterTypes, sortKey]);
+
+  const overlayViolations = useMemo(() => {
+    const top = filtered.slice(0, MAX_OVERLAY_BOXES);
+    if (!activeId) return top;
+    const active = filtered.find((v) => v.id === activeId);
+    if (!active) return top;
+    return top.some((v) => v.id === active.id)
+      ? top
+      : [active, ...top.slice(0, MAX_OVERLAY_BOXES - 1)];
+  }, [filtered, activeId]);
+
+  useEffect(() => {
+    if (!filtered.length) {
+      setActiveId(null);
+      return;
+    }
+    if (!activeId || !filtered.some((v) => v.id === activeId)) {
+      setActiveId(filtered[0].id);
+    }
+  }, [filtered, activeId]);
 
   if (!session) return null;
 
@@ -115,13 +138,15 @@ function ResultsPage() {
             value={`${Math.round(
               (session.violations.reduce((s, v) => s + v.confidence, 0) /
                 Math.max(1, session.violations.length)) *
-                100
+                100,
             )}%`}
           />
           <Stat label="Categories" value={types.length.toString()} />
           <Stat
             label="Media"
-            value={session.isVideo ? `Video · ${(session.durationSeconds ?? 0).toFixed(1)}s` : "Image"}
+            value={
+              session.isVideo ? `Video · ${(session.durationSeconds ?? 0).toFixed(1)}s` : "Image"
+            }
           />
         </div>
 
@@ -151,15 +176,13 @@ function ResultsPage() {
               ) : (
                 // Demo placeholder
                 <div className="absolute inset-0 bg-gradient-to-br from-[#1a1d24] via-[#2a2520] to-[#1f1a15] flex items-center justify-center">
-                  <span className="text-white/40 text-xs font-mono">
-                    DEMO · CAM_07 · 1920×1080
-                  </span>
+                  <span className="text-white/40 text-xs font-mono">DEMO · CAM_07 · 1920×1080</span>
                 </div>
               )}
 
               {/* Bounding boxes overlay */}
               <div className="absolute inset-0 pointer-events-none">
-                {filtered.map((v) => (
+                {overlayViolations.map((v) => (
                   <BoundingBox
                     key={v.id}
                     violation={v}
@@ -172,7 +195,7 @@ function ResultsPage() {
               {/* HUD */}
               <div className="absolute top-3 left-3 flex items-center gap-2 rounded-md bg-black/50 backdrop-blur px-2.5 py-1 text-[10px] font-mono text-white/80">
                 <span className="h-1.5 w-1.5 rounded-full bg-violation animate-pulse" />
-                ANNOTATED · {filtered.length} of {session.violations.length}
+                ANNOTATED · showing {overlayViolations.length} of {filtered.length}
               </div>
             </div>
           </div>
@@ -237,7 +260,7 @@ function ResultsPage() {
               <div className="px-5 py-4 border-b border-border flex items-center justify-between">
                 <span className="text-sm font-medium">Detections</span>
                 <span className="text-xs font-mono text-muted-foreground">
-                  {filtered.length}
+                  {filtered.length} (≥{Math.round(MIN_CONFIDENCE * 100)}%)
                 </span>
               </div>
               <div className="max-h-[520px] overflow-y-auto divide-y divide-border">
@@ -267,9 +290,7 @@ function ResultsPage() {
 function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
     <div className="bg-surface-elevated p-5">
-      <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-        {label}
-      </p>
+      <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{label}</p>
       <p
         className={`mt-2 text-2xl sm:text-3xl font-semibold tracking-tight ${
           accent ? "text-violation" : ""
@@ -308,15 +329,13 @@ function BoundingBox({
         height: `${violation.box.h * 100}%`,
       }}
     >
-      <span
-        className={`absolute -top-6 left-0 text-[10px] font-mono font-medium px-1.5 py-0.5 rounded whitespace-nowrap ${
-          active
-            ? "bg-violation text-violation-foreground"
-            : "bg-violation/90 text-violation-foreground"
-        }`}
-      >
-        {violation.label} · {(violation.confidence * 100).toFixed(0)}%
-      </span>
+      {active ? (
+        <span className="absolute -top-6 left-0 bg-violation text-violation-foreground text-[10px] font-mono font-medium px-1.5 py-0.5 rounded whitespace-nowrap">
+          {violation.label} · {(violation.confidence * 100).toFixed(0)}%
+        </span>
+      ) : (
+        <span className="absolute -top-1.5 -left-1.5 h-2.5 w-2.5 rounded-full bg-violation" />
+      )}
     </motion.button>
   );
 }
@@ -347,9 +366,7 @@ function ViolationRow({
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-medium tracking-tight truncate">
-              {violation.label}
-            </p>
+            <p className="text-sm font-medium tracking-tight truncate">{violation.label}</p>
             <span className="text-[10px] font-mono text-muted-foreground shrink-0">
               #{(index + 1).toString().padStart(2, "0")}
             </span>
@@ -383,9 +400,7 @@ function EmptyDetections() {
         <CheckCircle2 className="h-5 w-5" />
       </div>
       <p className="text-sm font-medium">No matching detections</p>
-      <p className="text-xs text-muted-foreground mt-1">
-        Adjust filters to see more results.
-      </p>
+      <p className="text-xs text-muted-foreground mt-1">Adjust filters to see more results.</p>
     </div>
   );
 }

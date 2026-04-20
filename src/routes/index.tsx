@@ -62,8 +62,8 @@ function HomePage() {
               </h1>
 
               <p className="mt-6 max-w-xl text-lg text-muted-foreground leading-relaxed">
-                Upload a video or image and Sentry analyses traffic patterns to surface
-                infractions with confidence scores and timestamped evidence.
+                Upload a video or image and Sentry analyses traffic patterns to surface infractions
+                with confidence scores and timestamped evidence.
               </p>
 
               <div className="mt-10 flex flex-wrap items-center gap-3">
@@ -85,10 +85,9 @@ function HomePage() {
                 </Link>
                 <Link
                   to="/upload"
-                  search={{ demo: true }}
                   className="inline-flex items-center gap-1.5 px-3 py-3 text-sm text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  Try a demo file <ArrowRight className="h-3.5 w-3.5" />
+                  Start with your file <ArrowRight className="h-3.5 w-3.5" />
                 </Link>
               </div>
             </motion.div>
@@ -107,9 +106,30 @@ function HomePage() {
                   <div className="absolute inset-0 grid-bg opacity-20" />
 
                   {/* Mock bounding boxes */}
-                  <BoundingBox x="14%" y="32%" w="18%" h="36%" label="No Helmet · 0.94" delay={0.4} />
-                  <BoundingBox x="46%" y="44%" w="22%" h="32%" label="Mobile Usage · 0.87" delay={0.7} />
-                  <BoundingBox x="74%" y="22%" w="16%" h="40%" label="Wrong Lane · 0.81" delay={1.0} />
+                  <BoundingBox
+                    x="14%"
+                    y="32%"
+                    w="18%"
+                    h="36%"
+                    label="No Helmet · 0.94"
+                    delay={0.4}
+                  />
+                  <BoundingBox
+                    x="46%"
+                    y="44%"
+                    w="22%"
+                    h="32%"
+                    label="Mobile Usage · 0.87"
+                    delay={0.7}
+                  />
+                  <BoundingBox
+                    x="74%"
+                    y="22%"
+                    w="16%"
+                    h="40%"
+                    label="Wrong Lane · 0.81"
+                    delay={1.0}
+                  />
 
                   {/* Scanline */}
                   <div className="absolute inset-0 overflow-hidden pointer-events-none">
@@ -145,8 +165,8 @@ function HomePage() {
                 </h2>
               </div>
               <p className="max-w-md text-muted-foreground">
-                Each detection includes a labelled bounding box, vehicle ID and confidence
-                score, with a timestamp when analysing video.
+                Each detection includes a labelled bounding box, vehicle ID and confidence score,
+                with a timestamp when analysing video.
               </p>
             </div>
 
@@ -156,9 +176,7 @@ function HomePage() {
                   key={v}
                   className="bg-surface-elevated p-6 sm:p-8 flex flex-col justify-between min-h-[160px] hover:bg-accent transition-colors"
                 >
-                  <span className="text-xs font-mono text-muted-foreground">
-                    0{i + 1}
-                  </span>
+                  <span className="text-xs font-mono text-muted-foreground">0{i + 1}</span>
                   <span className="text-lg font-medium tracking-tight mt-8">{v}</span>
                 </div>
               ))}
@@ -198,9 +216,7 @@ function HomePage() {
                     <div className="h-9 w-9 rounded-lg bg-foreground text-background flex items-center justify-center">
                       <Icon className="h-4 w-4" />
                     </div>
-                    <span className="text-xs font-mono text-muted-foreground">
-                      Step {i + 1}
-                    </span>
+                    <span className="text-xs font-mono text-muted-foreground">Step {i + 1}</span>
                   </div>
                   <h3 className="text-xl font-medium tracking-tight mb-2">{title}</h3>
                   <p className="text-muted-foreground leading-relaxed">{desc}</p>
@@ -217,7 +233,7 @@ function HomePage() {
               <Shield className="h-3.5 w-3.5" />
               <span>Sentry · Traffic Violation Detection</span>
             </div>
-            <span className="font-mono text-xs">v1.4.0 · simulated AI demo</span>
+            <span className="font-mono text-xs">v1.5.0 · API integrated</span>
           </div>
         </footer>
       </main>

@@ -1,0 +1,48 @@
+from pydantic import BaseModel, Field
+from typing import Literal
+
+ViolationType = Literal[
+    "no_helmet",
+    "no_seatbelt",
+    "red_light",
+    "wrong_lane",
+    "mobile_usage",
+    "overspeeding",
+    "drunk_driving",
+    "no_valid_license",
+    "triple_riding",
+    "no_parking",
+    "dangerous_driving",
+]
+
+
+class BoundingBox(BaseModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    w: float = Field(gt=0, le=1)
+    h: float = Field(gt=0, le=1)
+
+
+class Violation(BaseModel):
+    id: str
+    type: ViolationType
+    label: str
+    confidence: float = Field(ge=0, le=1)
+    timestamp: float | None = Field(default=None, ge=0)
+    box: BoundingBox
+    vehicle_id: str | None = None
+    description: str
+
+
+class AnalysisSummary(BaseModel):
+    total_violations: int
+    unique_types: int
+    avg_confidence: float = Field(ge=0, le=1)
+
+
+class AnalysisResponse(BaseModel):
+    file_name: str
+    is_video: bool
+    duration_seconds: float | None = Field(default=None, ge=0)
+    violations: list[Violation]
+    summary: AnalysisSummary
