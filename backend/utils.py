@@ -6,11 +6,13 @@ from pathlib import Path
 import cv2
 
 from detector import Detection, TrackedObject as DetectorTrackedObject, detect_objects, reset_tracker, track_objects
+from evidence import EvidenceCapture
 from schemas import (
     AnalysisResponse,
     AnalysisSummary,
     BoundingBox,
     DebugAnalysisResponse,
+    EvidenceMetadata,
     FrameDetections,
     RawDetection,
     RuleEngineViolation,
@@ -163,6 +165,7 @@ def process_image(
     rule_engine_violations: list[RuleEngineViolation] | None = None
     tracked_objects: list[TrackedObject] | None = None
     tracking_violations: list[TrackingViolation] | None = None
+    evidence_metadata: list[EvidenceMetadata] | None = None
 
     if include_tracking:
         reset_tracker()
@@ -183,7 +186,13 @@ def process_image(
             }
             for t in tracked_objects
         ]
-        tracking_violations = _to_tracking_violations(v_engine.process_frame(engine_input, image, timestamp=0.0))
+        frame_tracking_violations = v_engine.process_frame(engine_input, image, timestamp=0.0)
+        tracking_violations = _to_tracking_violations(frame_tracking_violations)
+
+        evidence = EvidenceCapture()
+        raw_metadata = evidence.capture(image, frame_tracking_violations)
+        if raw_metadata:
+            evidence_metadata = [EvidenceMetadata(**item) for item in raw_metadata]
 
     if include_rule_engine:
         rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO)
@@ -214,6 +223,7 @@ def process_image(
         rule_engine_violations=rule_engine_violations,
         tracked_objects=tracked_objects,
         tracking_violations=tracking_violations,
+        evidence_metadata=evidence_metadata,
         summary=summary,
     )
 
@@ -234,6 +244,7 @@ def process_image_debug(
     rule_engine_violations: list[RuleEngineViolation] | None = None
     tracked_objects: list[TrackedObject] | None = None
     tracking_violations: list[TrackingViolation] | None = None
+    evidence_metadata: list[EvidenceMetadata] | None = None
 
     if include_tracking:
         reset_tracker()
@@ -254,7 +265,13 @@ def process_image_debug(
             }
             for t in tracked_objects
         ]
-        tracking_violations = _to_tracking_violations(v_engine.process_frame(engine_input, image, timestamp=0.0))
+        frame_tracking_violations = v_engine.process_frame(engine_input, image, timestamp=0.0)
+        tracking_violations = _to_tracking_violations(frame_tracking_violations)
+
+        evidence = EvidenceCapture()
+        raw_metadata = evidence.capture(image, frame_tracking_violations)
+        if raw_metadata:
+            evidence_metadata = [EvidenceMetadata(**item) for item in raw_metadata]
 
     if include_rule_engine:
         rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO)
@@ -285,6 +302,7 @@ def process_image_debug(
         rule_engine_violations=rule_engine_violations,
         tracked_objects=tracked_objects,
         tracking_violations=tracking_violations,
+        evidence_metadata=evidence_metadata,
         summary=summary,
         frame_detections=[
             FrameDetections(
@@ -325,6 +343,8 @@ def process_video(
     tracked_objects: list[TrackedObject] | None = [] if include_tracking else None
     tracking_violations: list[TrackingViolation] | None = [] if include_violation_engine else None
     violation_engine = ViolationEngine(stop_line_ratio=STOP_LINE_Y_RATIO) if include_violation_engine else None
+    evidence_metadata: list[EvidenceMetadata] | None = [] if include_violation_engine else None
+    evidence = EvidenceCapture() if include_violation_engine else None
 
     if include_tracking or include_violation_engine:
         reset_tracker()
@@ -365,6 +385,9 @@ def process_video(
                 timestamp=frame_index / fps,
             )
             tracking_violations.extend(_to_tracking_violations(frame_tracking_violations))
+            if evidence is not None and evidence_metadata is not None:
+                raw_metadata = evidence.capture(frame, frame_tracking_violations)
+                evidence_metadata.extend(EvidenceMetadata(**item) for item in raw_metadata)
 
         if rule_detector is not None and rule_engine_violations is not None:
             frame_rule_violations = rule_detector.detect_violations(detections, frame)
@@ -418,6 +441,7 @@ def process_video(
         rule_engine_violations=rule_engine_violations,
         tracked_objects=tracked_objects,
         tracking_violations=tracking_violations,
+        evidence_metadata=evidence_metadata,
         summary=summary,
     )
 
@@ -449,6 +473,8 @@ def process_video_debug(
     tracked_objects: list[TrackedObject] | None = [] if include_tracking else None
     tracking_violations: list[TrackingViolation] | None = [] if include_violation_engine else None
     violation_engine = ViolationEngine(stop_line_ratio=STOP_LINE_Y_RATIO) if include_violation_engine else None
+    evidence_metadata: list[EvidenceMetadata] | None = [] if include_violation_engine else None
+    evidence = EvidenceCapture() if include_violation_engine else None
 
     if include_tracking or include_violation_engine:
         reset_tracker()
@@ -494,6 +520,10 @@ def process_video_debug(
             )
             if tracking_violations is not None:
                 tracking_violations.extend(frame_tracking_violations)
+            if evidence is not None and evidence_metadata is not None:
+                raw_input = [item.model_dump() for item in frame_tracking_violations]
+                raw_metadata = evidence.capture(frame, raw_input)
+                evidence_metadata.extend(EvidenceMetadata(**item) for item in raw_metadata)
 
         if rule_detector is not None and rule_engine_violations is not None:
             frame_rule_violations = rule_detector.detect_violations(detections, frame)
@@ -551,6 +581,7 @@ def process_video_debug(
         rule_engine_violations=rule_engine_violations,
         tracked_objects=tracked_objects,
         tracking_violations=tracking_violations,
+        evidence_metadata=evidence_metadata,
         summary=summary,
         frame_detections=frame_detections,
     )

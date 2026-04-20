@@ -243,32 +243,129 @@ class ViolationDetector:
         self,
         frame: np.ndarray,
         violations: list[dict[str, Any]],
+        tracked_objects: list[Any] | None = None,
     ) -> np.ndarray:
         color_map = {
             "no_helmet": (0, 0, 255),
-            "no_seatbelt": (0, 165, 255),
-            "red_light_violation": (255, 0, 255),
+            "red_light": (0, 255, 255),
+            "red_light_violation": (0, 255, 255),
+            "no_seatbelt": (255, 0, 0),
         }
 
+        def normalize_violation_type(raw: Any) -> str:
+            value = str(raw or "").strip().lower()
+            return "red_light" if value == "red_light_violation" else value
+
+        def label_bg(
+            canvas: np.ndarray,
+            text: str,
+            origin: tuple[int, int],
+            color: tuple[int, int, int],
+            scale: float = 0.5,
+            thickness: int = 1,
+        ) -> None:
+            tx, ty = origin
+            tx = max(0, tx)
+            (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+            y1 = max(0, ty - th - baseline - 4)
+            y2 = max(0, ty + baseline + 2)
+            x2 = min(canvas.shape[1] - 1, tx + tw + 6)
+            cv2.rectangle(canvas, (tx, y1), (x2, y2), color, -1)
+            cv2.putText(
+                canvas,
+                text,
+                (tx + 3, max(th + 1, ty - 2)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                scale,
+                (255, 255, 255),
+                thickness,
+                cv2.LINE_AA,
+            )
+
+        def parse_item(item: Any) -> tuple[int | None, str, tuple[int, int, int, int] | None]:
+            if isinstance(item, dict):
+                track_id = item.get("track_id") or item.get("id")
+                class_name = item.get("class_name") or item.get("class") or "object"
+                raw_box = item.get("bbox") or item.get("box") or item.get("xyxy")
+            else:
+                track_id = getattr(item, "track_id", None) or getattr(item, "id", None)
+                class_name = getattr(item, "class_name", None) or getattr(item, "class", None) or "object"
+                raw_box = (
+                    getattr(item, "bbox", None)
+                    or getattr(item, "box", None)
+                    or getattr(item, "xyxy", None)
+                    or getattr(item, "box_xyxy", None)
+                )
+
+            box = self._to_int_box(raw_box) if raw_box is not None else None
+
+            parsed_track_id: int | None = None
+            if track_id is not None:
+                try:
+                    parsed_track_id = int(track_id)
+                except (TypeError, ValueError):
+                    parsed_track_id = None
+
+            return parsed_track_id, str(class_name).strip().lower(), box
+
         output = frame.copy()
+
+        # Draw tracked objects first so violation highlights can stay on top.
+        violation_by_track: dict[int, str] = {}
         for item in violations:
+            raw_type = item.get("type")
+            track_id = item.get("track_id")
+            if raw_type is None or track_id is None:
+                continue
+            try:
+                violation_by_track[int(track_id)] = normalize_violation_type(raw_type)
+            except (TypeError, ValueError):
+                continue
+
+        tracked_rendered_ids: set[int] = set()
+        for tracked in tracked_objects or []:
+            track_id, class_name, box = parse_item(tracked)
+            if box is None:
+                continue
+
+            if track_id is not None:
+                tracked_rendered_ids.add(track_id)
+
+            x1, y1, x2, y2 = box
+            active_violation = violation_by_track.get(track_id) if track_id is not None else None
+            color = color_map.get(active_violation or "", (60, 200, 60))
+
+            cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
+            id_text = str(track_id) if track_id is not None else "-"
+            label_bg(output, f"ID {id_text} {class_name}", (x1, max(14, y1 - 6)), color)
+
+            if active_violation:
+                label_bg(
+                    output,
+                    f"Violation: {active_violation}",
+                    (x1, min(output.shape[0] - 6, y2 + 16)),
+                    color,
+                )
+
+        for item in violations:
+            track_id = item.get("track_id")
+            if track_id is not None:
+                try:
+                    if int(track_id) in tracked_rendered_ids:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
             x1, y1, x2, y2 = [int(v) for v in item["bbox"]]
-            violation_type = str(item["type"])
-            confidence = float(item["confidence"])
+            violation_type = normalize_violation_type(item.get("type"))
             color = color_map.get(violation_type, (255, 255, 0))
 
             cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
-            label = f"{violation_type} {confidence:.2f}"
-            cv2.putText(
-                output,
-                label,
-                (x1, max(16, y1 - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                color,
-                2,
-                cv2.LINE_AA,
-            )
+
+            class_name = item.get("class_name") or item.get("class") or "object"
+            id_text = str(track_id) if track_id is not None else "-"
+            label_bg(output, f"ID {id_text} {str(class_name).strip().lower()}", (x1, max(14, y1 - 6)), color)
+            label_bg(output, f"Violation: {violation_type}", (x1, min(output.shape[0] - 6, y2 + 16)), color)
 
         return output
 

@@ -65,6 +65,39 @@ def test_no_helmet_rule_suppresses_duplicates_for_same_track_in_cooldown():
     assert not any(v["type"] == "no_helmet" and v["track_id"] == 1 for v in violations_b)
 
 
+def test_dedup_dictionary_records_violation_types_per_track():
+    engine = ViolationEngine(stop_line_ratio=0.62)
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    tracks = [
+        {"id": 1, "class": "person", "bbox": [300, 220, 420, 620], "confidence": 0.9},
+        {"id": 2, "class": "motorcycle", "bbox": [250, 360, 520, 700], "confidence": 0.92},
+    ]
+
+    _ = engine.process_frame(tracks, frame, timestamp=3.0, frame_index=90)
+
+    assert 1 in engine.detected_violations
+    assert "no_helmet" in engine.detected_violations[1]
+
+
+def test_same_violation_allowed_again_after_cooldown_frames():
+    engine = ViolationEngine(stop_line_ratio=0.62, violation_cooldown_frames=5)
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    tracks = [
+        {"id": 1, "class": "person", "bbox": [300, 220, 420, 620], "confidence": 0.9},
+        {"id": 2, "class": "motorcycle", "bbox": [250, 360, 520, 700], "confidence": 0.92},
+    ]
+
+    first = engine.process_frame(tracks, frame, frame_index=10)
+    blocked = engine.process_frame(tracks, frame, frame_index=12)
+    allowed = engine.process_frame(tracks, frame, frame_index=16)
+
+    assert any(v["type"] == "no_helmet" and v["track_id"] == 1 for v in first)
+    assert not any(v["type"] == "no_helmet" and v["track_id"] == 1 for v in blocked)
+    assert any(v["type"] == "no_helmet" and v["track_id"] == 1 for v in allowed)
+
+
 def test_red_light_rule_emits_on_stop_line_crossing():
     engine = ViolationEngine(stop_line_ratio=0.62)
     engine.set_traffic_light_state("red")

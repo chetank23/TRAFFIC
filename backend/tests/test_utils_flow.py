@@ -57,3 +57,47 @@ def test_process_video_returns_duration_and_timestamps(monkeypatch, tmp_path):
     assert isinstance(result.violations, list)
     if result.violations:
         assert result.violations[0].timestamp is not None
+
+
+def test_process_image_with_violation_engine_captures_evidence(monkeypatch, tmp_path):
+    image_path = tmp_path / "frame.jpg"
+    image = np.zeros((240, 320, 3), dtype=np.uint8)
+    cv2.imwrite(str(image_path), image)
+
+    monkeypatch.setenv("EVIDENCE_DIR", str(tmp_path / "evidence"))
+
+    fake_detections = [
+        Detection(2, "car", 0.9, (80, 120, 220, 220)),
+    ]
+
+    monkeypatch.setattr(utils, "detect_objects", lambda _img: fake_detections)
+    monkeypatch.setattr(utils, "reset_tracker", lambda: None)
+    monkeypatch.setattr(
+        utils,
+        "track_objects",
+        lambda _img, _detections: [
+            utils.DetectorTrackedObject(11, "car", 0.9, (80, 120, 220, 220))
+        ],
+    )
+
+    def fake_process_frame(self, tracks, frame, timestamp=None, frame_index=None):
+        return [
+            {
+                "track_id": 11,
+                "type": "red_light_violation",
+                "bbox": [80, 120, 220, 220],
+                "timestamp": float(timestamp or 0.0),
+            }
+        ]
+
+    monkeypatch.setattr(utils.ViolationEngine, "process_frame", fake_process_frame)
+
+    result = utils.process_image(
+        str(image_path),
+        "frame.jpg",
+        include_violation_engine=True,
+    )
+
+    assert result.evidence_metadata is not None
+    assert len(result.evidence_metadata) == 1
+    assert result.evidence_metadata[0].type == "red_light"

@@ -34,13 +34,22 @@ class ViolationEngine:
     MIN_MOTORCYCLE_CONFIDENCE = 0.35
     MIN_PERSON_BOX_HEIGHT = 30.0
 
-    def __init__(self, stop_line_ratio: float = 0.62, max_missed_frames: int = 25) -> None:
+    def __init__(
+        self,
+        stop_line_ratio: float = 0.62,
+        max_missed_frames: int = 25,
+        violation_cooldown_frames: int = 45,
+    ) -> None:
         self.history: dict[int, TrackState] = {}
         self.stop_line_ratio = stop_line_ratio
         self.max_missed_frames = max_missed_frames
+        self.violation_cooldown_frames = max(1, violation_cooldown_frames)
         self.traffic_light_state: str | None = None
-        self._violation_cooldown: dict[tuple[int, str], float] = {}
-        self._red_light_logged_tracks: set[int] = set()
+        # Required dedupe structure: {track_id: [violations already detected]}.
+        # Internally stored as sets for efficient O(1) membership checks.
+        self.detected_violations: dict[int, set[str]] = {}
+        # Frame index of last emission per (track, violation_type).
+        self._violation_last_frame: dict[int, dict[str, int]] = {}
         self._seatbelt_classifier: Callable[[object, dict, dict, dict], bool | float] = self._default_seatbelt_classifier
 
     def set_seatbelt_classifier(self, classifier: Callable[[object, dict, dict, dict], bool | float]) -> None:
@@ -73,17 +82,23 @@ class ViolationEngine:
         self._update_history(parsed_tracks, ts)
 
         violations: list[dict] = []
-        violations.extend(self._check_helmet_rule(parsed_tracks, ts))
+        violations.extend(self._check_helmet_rule(parsed_tracks, ts, frame_no))
         violations.extend(self._check_red_light_rule(parsed_tracks, stop_line_y, ts, frame_no))
-        violations.extend(self._check_seatbelt_rule(parsed_tracks, frame, ts))
+        violations.extend(self._check_seatbelt_rule(parsed_tracks, frame, ts, frame_no))
 
         self._cleanup_history()
         return violations
 
-    def _check_helmet_rule(self, tracks: list[dict], timestamp: float) -> list[dict]:
-        return self.detect_no_helmet_violations(tracks, timestamp)
+    def _check_helmet_rule(self, tracks: list[dict], timestamp: float, frame_index: int) -> list[dict]:
+        return self.detect_no_helmet_violations(tracks, timestamp, frame_index)
 
-    def detect_no_helmet_violations(self, tracks: list[dict], timestamp: float) -> list[dict]:
+    def detect_no_helmet_violations(
+        self,
+        tracks: list[dict],
+        timestamp: float,
+        frame_index: int | None = None,
+    ) -> list[dict]:
+        current_frame = int(frame_index) if frame_index is not None else int(round(float(timestamp) * 30.0))
         people = [t for t in tracks if t["class"] == "person"]
         helmets = [t for t in tracks if t["class"] == "helmet"]
         motorcycles = [t for t in tracks if t["class"] == "motorcycle"]
@@ -122,7 +137,7 @@ class ViolationEngine:
             if has_helmet:
                 continue
 
-            if self._cooldown_active(person["id"], "no_helmet", timestamp, 1.4):
+            if not self._should_emit_violation(person["id"], "no_helmet", current_frame):
                 continue
 
             seen_track_ids.add(person["id"])
@@ -186,8 +201,6 @@ class ViolationEngine:
         violations: list[dict] = []
         for track in tracks:
             track_id = track["id"]
-            if track_id in self._red_light_logged_tracks:
-                continue
             if track["class"] not in {"car", "motorcycle"}:
                 continue
 
@@ -201,7 +214,9 @@ class ViolationEngine:
             if not crossed_line:
                 continue
 
-            self._red_light_logged_tracks.add(track_id)
+            if not self._should_emit_violation(track_id, "red_light_violation", frame_index):
+                continue
+
             violations.append(
                 {
                     "type": "red_light_violation",
@@ -212,10 +227,16 @@ class ViolationEngine:
 
         return violations
 
-    def _check_seatbelt_rule(self, tracks: list[dict], frame, timestamp: float) -> list[dict]:
-        return self.detect_no_seatbelt_violations(tracks, frame, timestamp)
+    def _check_seatbelt_rule(self, tracks: list[dict], frame, timestamp: float, frame_index: int) -> list[dict]:
+        return self.detect_no_seatbelt_violations(tracks, frame, timestamp, frame_index)
 
-    def detect_no_seatbelt_violations(self, tracks: list[dict], frame, timestamp: float) -> list[dict]:
+    def detect_no_seatbelt_violations(
+        self,
+        tracks: list[dict],
+        frame,
+        timestamp: float,
+        frame_index: int | None = None,
+    ) -> list[dict]:
         """Detect no-seatbelt violations using a hybrid rule + classifier hook.
 
         Steps:
@@ -226,6 +247,7 @@ class ViolationEngine:
         """
         if frame is None:
             return []
+        current_frame = int(frame_index) if frame_index is not None else int(round(float(timestamp) * 30.0))
 
         cars = [t for t in tracks if t["class"] == "car"]
         persons = [t for t in tracks if t["class"] == "person"]
@@ -266,7 +288,7 @@ class ViolationEngine:
             if has_seatbelt:
                 continue
 
-            if self._cooldown_active(driver["id"], "no_seatbelt", timestamp, 1.8):
+            if not self._should_emit_violation(driver["id"], "no_seatbelt", current_frame):
                 continue
 
             seen_driver_ids.add(driver["id"])
@@ -319,7 +341,8 @@ class ViolationEngine:
         stale = [tid for tid, state in self.history.items() if state.missed_frames > self.max_missed_frames]
         for tid in stale:
             self.history.pop(tid, None)
-            self._red_light_logged_tracks.discard(tid)
+            self.detected_violations.pop(tid, None)
+            self._violation_last_frame.pop(tid, None)
 
     def _is_red_light_active(self, tracks: list[dict]) -> bool:
         if self.traffic_light_state is not None:
@@ -342,14 +365,17 @@ class ViolationEngine:
 
         return max(candidates, key=lambda m: self._iou(person_box, m["bbox"]))
 
-    def _cooldown_active(self, track_id: int, violation_type: str, timestamp: float, seconds: float) -> bool:
-        key = (track_id, violation_type)
-        last_ts = self._violation_cooldown.get(key)
-        if last_ts is not None and (timestamp - last_ts) < seconds:
-            return True
+    def _should_emit_violation(self, track_id: int, violation_type: str, frame_index: int) -> bool:
+        types_for_track = self.detected_violations.setdefault(track_id, set())
+        last_frame_by_type = self._violation_last_frame.setdefault(track_id, {})
+        last_frame = last_frame_by_type.get(violation_type)
 
-        self._violation_cooldown[key] = timestamp
-        return False
+        if last_frame is not None and (int(frame_index) - last_frame) < self.violation_cooldown_frames:
+            return False
+
+        types_for_track.add(violation_type)
+        last_frame_by_type[violation_type] = int(frame_index)
+        return True
 
     def _parse_track(self, raw: dict) -> dict | None:
         if not isinstance(raw, dict):

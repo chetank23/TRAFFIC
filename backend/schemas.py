@@ -61,6 +61,12 @@ class TrackingViolation(BaseModel):
     timestamp: float = Field(ge=0)
 
 
+class EvidenceMetadata(BaseModel):
+    type: str
+    time: str
+    image_path: str
+
+
 class AnalysisResponse(BaseModel):
     file_name: str
     is_video: bool
@@ -69,6 +75,7 @@ class AnalysisResponse(BaseModel):
     rule_engine_violations: list[RuleEngineViolation] | None = None
     tracked_objects: list[TrackedObject] | None = None
     tracking_violations: list[TrackingViolation] | None = None
+    evidence_metadata: list[EvidenceMetadata] | None = None
     summary: AnalysisSummary
 
 
