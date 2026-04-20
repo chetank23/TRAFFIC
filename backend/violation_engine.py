@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Callable
 
 
 @dataclass
@@ -28,6 +29,10 @@ class ViolationEngine:
 
     VEHICLE_CLASSES = {"car", "motorcycle", "bus", "truck"}
     RED_LABELS = {"red", "red_light", "traffic light red", "red signal"}
+    MIN_RIDER_MOTORCYCLE_IOU = 0.2
+    MIN_PERSON_CONFIDENCE = 0.35
+    MIN_MOTORCYCLE_CONFIDENCE = 0.35
+    MIN_PERSON_BOX_HEIGHT = 30.0
 
     def __init__(self, stop_line_ratio: float = 0.62, max_missed_frames: int = 25) -> None:
         self.history: dict[int, TrackState] = {}
@@ -35,12 +40,32 @@ class ViolationEngine:
         self.max_missed_frames = max_missed_frames
         self.traffic_light_state: str | None = None
         self._violation_cooldown: dict[tuple[int, str], float] = {}
+        self._red_light_logged_tracks: set[int] = set()
+        self._seatbelt_classifier: Callable[[object, dict, dict, dict], bool | float] = self._default_seatbelt_classifier
+
+    def set_seatbelt_classifier(self, classifier: Callable[[object, dict, dict, dict], bool | float]) -> None:
+        """Inject a custom seatbelt classifier.
+
+        Classifier signature:
+        (driver_crop, driver_track, car_track, context) -> bool | float
+
+        - bool: True means seatbelt present
+        - float: probability in [0, 1], where >= 0.5 means seatbelt present
+        """
+        self._seatbelt_classifier = classifier
 
     def set_traffic_light_state(self, state: str | None) -> None:
         self.traffic_light_state = state.lower().strip() if state else None
 
-    def process_frame(self, tracks: list[dict], frame, timestamp: float | None = None) -> list[dict]:
+    def process_frame(
+        self,
+        tracks: list[dict],
+        frame,
+        timestamp: float | None = None,
+        frame_index: int | None = None,
+    ) -> list[dict]:
         ts = float(timestamp) if timestamp is not None else time.time()
+        frame_no = int(frame_index) if frame_index is not None else int(round(ts * 30.0))
         frame_h = frame.shape[0] if frame is not None else 0
         stop_line_y = frame_h * max(0.0, min(1.0, self.stop_line_ratio))
 
@@ -49,26 +74,47 @@ class ViolationEngine:
 
         violations: list[dict] = []
         violations.extend(self._check_helmet_rule(parsed_tracks, ts))
-        violations.extend(self._check_red_light_rule(parsed_tracks, stop_line_y, ts))
-        violations.extend(self._check_seatbelt_placeholder(parsed_tracks, ts))
+        violations.extend(self._check_red_light_rule(parsed_tracks, stop_line_y, ts, frame_no))
+        violations.extend(self._check_seatbelt_rule(parsed_tracks, frame, ts))
 
         self._cleanup_history()
         return violations
 
     def _check_helmet_rule(self, tracks: list[dict], timestamp: float) -> list[dict]:
+        return self.detect_no_helmet_violations(tracks, timestamp)
+
+    def detect_no_helmet_violations(self, tracks: list[dict], timestamp: float) -> list[dict]:
         people = [t for t in tracks if t["class"] == "person"]
         helmets = [t for t in tracks if t["class"] == "helmet"]
         motorcycles = [t for t in tracks if t["class"] == "motorcycle"]
 
         violations: list[dict] = []
+        seen_track_ids: set[int] = set()
+
         for person in people:
-            rider_bike = self._find_associated_vehicle(person["bbox"], motorcycles)
+            if person["id"] in seen_track_ids:
+                continue
+
+            # Skip very weak/partial person detections to reduce false positives.
+            if person["confidence"] < self.MIN_PERSON_CONFIDENCE:
+                continue
+            if (person["bbox"][3] - person["bbox"][1]) < self.MIN_PERSON_BOX_HEIGHT:
+                continue
+
+            rider_bike = self._find_associated_vehicle(
+                person["bbox"],
+                motorcycles,
+                min_iou=self.MIN_RIDER_MOTORCYCLE_IOU,
+            )
             if rider_bike is None:
+                continue
+
+            if rider_bike["confidence"] < self.MIN_MOTORCYCLE_CONFIDENCE:
                 continue
 
             head_box = self._extract_head_region(person["bbox"])
             has_helmet = any(
-                self._iou(head_box, helmet["bbox"]) > 0.03
+                self._iou(head_box, helmet["bbox"]) > 0.0
                 or self._point_in_box(self._center(helmet["bbox"]), head_box)
                 for helmet in helmets
             )
@@ -79,6 +125,7 @@ class ViolationEngine:
             if self._cooldown_active(person["id"], "no_helmet", timestamp, 1.4):
                 continue
 
+            seen_track_ids.add(person["id"])
             violations.append(
                 {
                     "track_id": person["id"],
@@ -90,47 +137,162 @@ class ViolationEngine:
 
         return violations
 
-    def _check_red_light_rule(self, tracks: list[dict], stop_line_y: float, timestamp: float) -> list[dict]:
-        red_active = self._is_red_light_active(tracks)
-        if not red_active:
+    def _check_red_light_rule(
+        self,
+        tracks: list[dict],
+        stop_line_y: float,
+        timestamp: float,
+        frame_index: int,
+    ) -> list[dict]:
+        traffic_state = self.traffic_light_state
+        if traffic_state is None:
+            traffic_state = "red" if self._is_red_light_active(tracks) else "green"
+
+        raw = self.detect_red_light_violations(
+            tracks=tracks,
+            traffic_light_state=traffic_state,
+            frame_index=frame_index,
+            stop_line_y=stop_line_y,
+        )
+
+        track_by_id = {t["id"]: t for t in tracks}
+        violations: list[dict] = []
+        for item in raw:
+            track = track_by_id.get(item["track_id"])
+            if track is None:
+                continue
+            violations.append(
+                {
+                    "track_id": item["track_id"],
+                    "type": item["type"],
+                    "bbox": list(track["bbox"]),
+                    "timestamp": timestamp,
+                    "frame": item["frame"],
+                }
+            )
+
+        return violations
+
+    def detect_red_light_violations(
+        self,
+        tracks: list[dict],
+        traffic_light_state: str,
+        frame_index: int,
+        stop_line_y: float,
+    ) -> list[dict]:
+        if traffic_light_state.lower().strip() != "red":
             return []
 
         violations: list[dict] = []
         for track in tracks:
-            if track["class"] not in self.VEHICLE_CLASSES:
+            track_id = track["id"]
+            if track_id in self._red_light_logged_tracks:
+                continue
+            if track["class"] not in {"car", "motorcycle"}:
                 continue
 
-            state = self.history.get(track["id"])
+            state = self.history.get(track_id)
             if state is None or len(state.centers) < 2:
                 continue
 
             prev_y = state.centers[-2][1]
             curr_y = state.centers[-1][1]
-            crossed = (prev_y - stop_line_y) * (curr_y - stop_line_y) <= 0 and abs(curr_y - prev_y) > 5
-
-            if not crossed:
+            crossed_line = prev_y < stop_line_y <= curr_y
+            if not crossed_line:
                 continue
 
-            if self._cooldown_active(track["id"], "red_light", timestamp, 1.8):
-                continue
-
+            self._red_light_logged_tracks.add(track_id)
             violations.append(
                 {
-                    "track_id": track["id"],
-                    "type": "red_light",
-                    "bbox": list(track["bbox"]),
+                    "type": "red_light_violation",
+                    "track_id": track_id,
+                    "frame": int(frame_index),
+                }
+            )
+
+        return violations
+
+    def _check_seatbelt_rule(self, tracks: list[dict], frame, timestamp: float) -> list[dict]:
+        return self.detect_no_seatbelt_violations(tracks, frame, timestamp)
+
+    def detect_no_seatbelt_violations(self, tracks: list[dict], frame, timestamp: float) -> list[dict]:
+        """Detect no-seatbelt violations using a hybrid rule + classifier hook.
+
+        Steps:
+        1) Find driver region in each car (front-left region).
+        2) Match a person as driver candidate inside that region.
+        3) Crop driver region and run pluggable classifier hook.
+        4) If no seatbelt -> emit violation.
+        """
+        if frame is None:
+            return []
+
+        cars = [t for t in tracks if t["class"] == "car"]
+        persons = [t for t in tracks if t["class"] == "person"]
+        seatbelts = [t for t in tracks if t["class"] == "seatbelt"]
+
+        violations: list[dict] = []
+        seen_driver_ids: set[int] = set()
+
+        for car in cars:
+            driver_region = self._extract_driver_region(car["bbox"])
+            driver_candidates = [
+                p
+                for p in persons
+                if self._iou(p["bbox"], car["bbox"]) > 0.05
+                and (
+                    self._iou(p["bbox"], driver_region) > 0.03
+                    or self._point_in_box(self._center(p["bbox"]), driver_region)
+                )
+            ]
+            if not driver_candidates:
+                continue
+
+            driver = max(driver_candidates, key=lambda p: self._iou(p["bbox"], driver_region))
+            if driver["id"] in seen_driver_ids:
+                continue
+
+            crop = self._crop_region(frame, driver_region)
+            if crop is None:
+                continue
+
+            context = {
+                "seatbelts": seatbelts,
+                "driver_region": driver_region,
+            }
+            classifier_result = self._seatbelt_classifier(crop, driver, car, context)
+            has_seatbelt = bool(classifier_result) if isinstance(classifier_result, bool) else float(classifier_result) >= 0.5
+
+            if has_seatbelt:
+                continue
+
+            if self._cooldown_active(driver["id"], "no_seatbelt", timestamp, 1.8):
+                continue
+
+            seen_driver_ids.add(driver["id"])
+            violations.append(
+                {
+                    "type": "no_seatbelt",
+                    "track_id": driver["id"],
+                    "bbox": list(driver["bbox"]),
                     "timestamp": timestamp,
                 }
             )
 
         return violations
 
-    def _check_seatbelt_placeholder(self, tracks: list[dict], timestamp: float) -> list[dict]:
-        # Placeholder for seatbelt-specific classifier or richer pose cues.
-        # Keep the hook modular so the rule can be upgraded without touching other rules.
-        _ = tracks
-        _ = timestamp
-        return []
+    def _default_seatbelt_classifier(self, _driver_crop, _driver: dict, _car: dict, context: dict) -> bool:
+        # Demo heuristic: if a detected seatbelt overlaps the driver region, treat as compliant.
+        seatbelts = context.get("seatbelts", [])
+        driver_region = context.get("driver_region")
+        if driver_region is None:
+            return False
+
+        return any(
+            self._iou(sb["bbox"], driver_region) > 0.02
+            or self._point_in_box(self._center(sb["bbox"]), driver_region)
+            for sb in seatbelts
+        )
 
     def _update_history(self, tracks: list[dict], timestamp: float) -> None:
         current_ids = {t["id"] for t in tracks}
@@ -157,6 +319,7 @@ class ViolationEngine:
         stale = [tid for tid, state in self.history.items() if state.missed_frames > self.max_missed_frames]
         for tid in stale:
             self.history.pop(tid, None)
+            self._red_light_logged_tracks.discard(tid)
 
     def _is_red_light_active(self, tracks: list[dict]) -> bool:
         if self.traffic_light_state is not None:
@@ -166,9 +329,12 @@ class ViolationEngine:
         return bool(classes.intersection(self.RED_LABELS))
 
     def _find_associated_vehicle(
-        self, person_box: tuple[float, float, float, float], motorcycles: list[dict]
+        self,
+        person_box: tuple[float, float, float, float],
+        motorcycles: list[dict],
+        min_iou: float = 0.08,
     ) -> dict | None:
-        candidates = [m for m in motorcycles if self._iou(person_box, m["bbox"]) > 0.08]
+        candidates = [m for m in motorcycles if self._iou(person_box, m["bbox"]) > min_iou]
         if not candidates:
             candidates = [m for m in motorcycles if self._distance(person_box, m["bbox"]) < 90.0]
         if not candidates:
@@ -213,6 +379,30 @@ class ViolationEngine:
     def _extract_head_region(box: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
         x1, y1, x2, y2 = box
         return (x1, y1, x2, y1 + 0.25 * (y2 - y1))
+
+    @staticmethod
+    def _extract_driver_region(box: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        x1, y1, x2, y2 = box
+        w = x2 - x1
+        h = y2 - y1
+        return (
+            x1,
+            y1 + 0.12 * h,
+            x1 + 0.45 * w,
+            y1 + 0.72 * h,
+        )
+
+    @staticmethod
+    def _crop_region(frame, box: tuple[float, float, float, float]):
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = box
+        ix1 = max(0, min(w - 1, int(x1)))
+        iy1 = max(0, min(h - 1, int(y1)))
+        ix2 = max(ix1 + 1, min(w, int(x2)))
+        iy2 = max(iy1 + 1, min(h, int(y2)))
+        if ix2 <= ix1 or iy2 <= iy1:
+            return None
+        return frame[iy1:iy2, ix1:ix2]
 
     @staticmethod
     def _center(box: tuple[float, float, float, float]) -> tuple[float, float]:
