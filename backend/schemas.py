@@ -40,11 +40,19 @@ class AnalysisSummary(BaseModel):
     avg_confidence: float = Field(ge=0, le=1)
 
 
+class RuleEngineViolation(BaseModel):
+    type: str
+    bbox: tuple[float, float, float, float]
+    confidence: float = Field(ge=0, le=1)
+    timestamp: float | None = Field(default=None, ge=0)
+
+
 class AnalysisResponse(BaseModel):
     file_name: str
     is_video: bool
     duration_seconds: float | None = Field(default=None, ge=0)
     violations: list[Violation]
+    rule_engine_violations: list[RuleEngineViolation] | None = None
     summary: AnalysisSummary
 
 

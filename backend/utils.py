@@ -6,7 +6,16 @@ from pathlib import Path
 import cv2
 
 from detector import Detection, detect_objects
-from schemas import AnalysisResponse, AnalysisSummary, BoundingBox, DebugAnalysisResponse, FrameDetections, RawDetection
+from schemas import (
+    AnalysisResponse,
+    AnalysisSummary,
+    BoundingBox,
+    DebugAnalysisResponse,
+    FrameDetections,
+    RawDetection,
+    RuleEngineViolation,
+)
+from violation_detector import ViolationDetector
 from violations import FrameContext, detect_violations
 
 
@@ -64,13 +73,49 @@ def _to_raw_detections(detections: list[Detection], frame_width: int, frame_heig
     ]
 
 
-def process_image(path: str, file_name: str) -> AnalysisResponse:
+def _to_rule_engine_violations(
+    rule_violations: list[dict[str, object]], timestamp: float | None = None
+) -> list[RuleEngineViolation]:
+    converted: list[RuleEngineViolation] = []
+    for item in rule_violations:
+        bbox_raw = item.get("bbox")
+        if not isinstance(bbox_raw, list | tuple) or len(bbox_raw) != 4:
+            continue
+
+        violation_timestamp = item.get("timestamp", timestamp)
+        if violation_timestamp is not None:
+            violation_timestamp = float(violation_timestamp)
+
+        converted.append(
+            RuleEngineViolation(
+                type=str(item.get("type", "unknown")),
+                bbox=(
+                    float(bbox_raw[0]),
+                    float(bbox_raw[1]),
+                    float(bbox_raw[2]),
+                    float(bbox_raw[3]),
+                ),
+                confidence=float(item.get("confidence", 0.0)),
+                timestamp=violation_timestamp,
+            )
+        )
+
+    return converted
+
+
+def process_image(path: str, file_name: str, include_rule_engine: bool = False) -> AnalysisResponse:
     image = cv2.imread(path)
     if image is None:
         raise ValueError("Unable to read image file")
 
     h, w = image.shape[:2]
     detections = detect_objects(image)
+    rule_engine_violations: list[RuleEngineViolation] | None = None
+
+    if include_rule_engine:
+        rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO)
+        rule_engine_violations = _to_rule_engine_violations(rule_detector.detect_violations(detections, image))
+
     violations = detect_violations(
         detections,
         FrameContext(
@@ -93,17 +138,24 @@ def process_image(path: str, file_name: str) -> AnalysisResponse:
         is_video=False,
         duration_seconds=None,
         violations=violations,
+        rule_engine_violations=rule_engine_violations,
         summary=summary,
     )
 
 
-def process_image_debug(path: str, file_name: str) -> DebugAnalysisResponse:
+def process_image_debug(path: str, file_name: str, include_rule_engine: bool = False) -> DebugAnalysisResponse:
     image = cv2.imread(path)
     if image is None:
         raise ValueError("Unable to read image file")
 
     h, w = image.shape[:2]
     detections = detect_objects(image)
+    rule_engine_violations: list[RuleEngineViolation] | None = None
+
+    if include_rule_engine:
+        rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO)
+        rule_engine_violations = _to_rule_engine_violations(rule_detector.detect_violations(detections, image))
+
     violations = detect_violations(
         detections,
         FrameContext(
@@ -126,6 +178,7 @@ def process_image_debug(path: str, file_name: str) -> DebugAnalysisResponse:
         is_video=False,
         duration_seconds=None,
         violations=violations,
+        rule_engine_violations=rule_engine_violations,
         summary=summary,
         frame_detections=[
             FrameDetections(
@@ -137,7 +190,7 @@ def process_image_debug(path: str, file_name: str) -> DebugAnalysisResponse:
     )
 
 
-def process_video(path: str, file_name: str) -> AnalysisResponse:
+def process_video(path: str, file_name: str, include_rule_engine: bool = False) -> AnalysisResponse:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("Unable to open video file")
@@ -153,6 +206,8 @@ def process_video(path: str, file_name: str) -> AnalysisResponse:
     stride = max(1, int(round(fps / 5.0)))  # sample around 5 frames per second
 
     violations = []
+    rule_engine_violations: list[RuleEngineViolation] | None = [] if include_rule_engine else None
+    rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO) if include_rule_engine else None
     previous_vehicle_centers: dict[str, tuple[float, float]] = {}
 
     while cap.isOpened():
@@ -166,6 +221,12 @@ def process_video(path: str, file_name: str) -> AnalysisResponse:
 
         h, w = frame.shape[:2]
         detections = detect_objects(frame)
+
+        if rule_detector is not None and rule_engine_violations is not None:
+            frame_rule_violations = rule_detector.detect_violations(detections, frame)
+            rule_engine_violations.extend(
+                _to_rule_engine_violations(frame_rule_violations, timestamp=frame_index / fps)
+            )
 
         ctx = FrameContext(
             frame_width=w,
@@ -210,11 +271,12 @@ def process_video(path: str, file_name: str) -> AnalysisResponse:
         is_video=True,
         duration_seconds=duration,
         violations=violations,
+        rule_engine_violations=rule_engine_violations,
         summary=summary,
     )
 
 
-def process_video_debug(path: str, file_name: str) -> DebugAnalysisResponse:
+def process_video_debug(path: str, file_name: str, include_rule_engine: bool = False) -> DebugAnalysisResponse:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("Unable to open video file")
@@ -230,6 +292,8 @@ def process_video_debug(path: str, file_name: str) -> DebugAnalysisResponse:
     stride = max(1, int(round(fps / 5.0)))
 
     violations = []
+    rule_engine_violations: list[RuleEngineViolation] | None = [] if include_rule_engine else None
+    rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO) if include_rule_engine else None
     previous_vehicle_centers: dict[str, tuple[float, float]] = {}
     frame_detections: list[FrameDetections] = []
 
@@ -244,6 +308,12 @@ def process_video_debug(path: str, file_name: str) -> DebugAnalysisResponse:
 
         h, w = frame.shape[:2]
         detections = detect_objects(frame)
+
+        if rule_detector is not None and rule_engine_violations is not None:
+            frame_rule_violations = rule_detector.detect_violations(detections, frame)
+            rule_engine_violations.extend(
+                _to_rule_engine_violations(frame_rule_violations, timestamp=frame_index / fps)
+            )
 
         if len(frame_detections) < DEBUG_MAX_FRAMES:
             frame_detections.append(
@@ -290,6 +360,7 @@ def process_video_debug(path: str, file_name: str) -> DebugAnalysisResponse:
         is_video=True,
         duration_seconds=duration,
         violations=violations,
+        rule_engine_violations=rule_engine_violations,
         summary=summary,
         frame_detections=frame_detections,
     )

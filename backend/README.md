@@ -8,6 +8,13 @@ FastAPI service for traffic violation analysis from uploaded image/video.
 - `POST /upload` -> run detection and return normalized violations
 - `POST /upload/debug` -> run detection and include raw model detections per sampled frame
 
+Enable side-by-side rule-engine output by adding query param `include_rule_engine=true`:
+
+```bash
+POST /upload?include_rule_engine=true
+POST /upload/debug?include_rule_engine=true
+```
+
 ## Setup
 
 ```bash
