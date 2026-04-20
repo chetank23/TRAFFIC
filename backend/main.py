@@ -64,6 +64,7 @@ async def upload_media(
     file: UploadFile = File(...),
     include_rule_engine: bool = Query(default=False),
     include_tracking: bool = Query(default=False),
+    include_violation_engine: bool = Query(default=False),
 ) -> AnalysisResponse:
     temp_path, original_name = await _validate_and_store_upload(file)
 
@@ -74,12 +75,14 @@ async def upload_media(
                 original_name,
                 include_rule_engine=include_rule_engine,
                 include_tracking=include_tracking,
+                include_violation_engine=include_violation_engine,
             )
         return process_image(
             temp_path,
             original_name,
             include_rule_engine=include_rule_engine,
             include_tracking=include_tracking,
+            include_violation_engine=include_violation_engine,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -97,6 +100,7 @@ async def upload_media_debug(
     file: UploadFile = File(...),
     include_rule_engine: bool = Query(default=False),
     include_tracking: bool = Query(default=False),
+    include_violation_engine: bool = Query(default=False),
 ) -> DebugAnalysisResponse:
     temp_path, original_name = await _validate_and_store_upload(file)
 
@@ -107,12 +111,14 @@ async def upload_media_debug(
                 original_name,
                 include_rule_engine=include_rule_engine,
                 include_tracking=include_tracking,
+                include_violation_engine=include_violation_engine,
             )
         return process_image_debug(
             temp_path,
             original_name,
             include_rule_engine=include_rule_engine,
             include_tracking=include_tracking,
+            include_violation_engine=include_violation_engine,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

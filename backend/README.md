@@ -22,6 +22,15 @@ POST /upload?include_tracking=true
 POST /upload/debug?include_tracking=true
 ```
 
+Enable the temporal modular violation engine (helmet/red-light/seatbelt placeholder):
+
+```bash
+POST /upload?include_violation_engine=true
+POST /upload/debug?include_violation_engine=true
+```
+
+`include_violation_engine=true` processes tracked objects and returns `tracking_violations`.
+
 Tracking output format:
 
 ```json
@@ -31,6 +40,19 @@ Tracking output format:
 		"class": "car",
 		"bbox": [120.0, 220.0, 360.0, 420.0],
 		"confidence": 0.92
+	}
+]
+```
+
+Tracking violation output format:
+
+```json
+[
+	{
+		"track_id": 12,
+		"type": "no_helmet",
+		"bbox": [110.0, 220.0, 250.0, 520.0],
+		"timestamp": 14.6
 	}
 ]
 ```

@@ -14,8 +14,10 @@ from schemas import (
     FrameDetections,
     RawDetection,
     RuleEngineViolation,
+    TrackingViolation,
     TrackedObject,
 )
+from violation_engine import ViolationEngine
 from violation_detector import ViolationDetector
 from violations import FrameContext, detect_violations
 
@@ -121,11 +123,36 @@ def _to_tracked_objects(tracks: list[DetectorTrackedObject]) -> list[TrackedObje
     ]
 
 
+def _to_tracking_violations(items: list[dict]) -> list[TrackingViolation]:
+    converted: list[TrackingViolation] = []
+    for item in items:
+        bbox_raw = item.get("bbox")
+        if not isinstance(bbox_raw, list | tuple) or len(bbox_raw) != 4:
+            continue
+
+        converted.append(
+            TrackingViolation(
+                track_id=int(item.get("track_id", -1)),
+                type=str(item.get("type", "unknown")),
+                bbox=(
+                    float(bbox_raw[0]),
+                    float(bbox_raw[1]),
+                    float(bbox_raw[2]),
+                    float(bbox_raw[3]),
+                ),
+                timestamp=float(item.get("timestamp", 0.0)),
+            )
+        )
+
+    return converted
+
+
 def process_image(
     path: str,
     file_name: str,
     include_rule_engine: bool = False,
     include_tracking: bool = False,
+    include_violation_engine: bool = False,
 ) -> AnalysisResponse:
     image = cv2.imread(path)
     if image is None:
@@ -135,10 +162,28 @@ def process_image(
     detections = detect_objects(image)
     rule_engine_violations: list[RuleEngineViolation] | None = None
     tracked_objects: list[TrackedObject] | None = None
+    tracking_violations: list[TrackingViolation] | None = None
 
     if include_tracking:
         reset_tracker()
         tracked_objects = _to_tracked_objects(track_objects(image, detections))
+
+    if include_violation_engine:
+        if tracked_objects is None:
+            reset_tracker()
+            tracked_objects = _to_tracked_objects(track_objects(image, detections))
+
+        v_engine = ViolationEngine(stop_line_ratio=STOP_LINE_Y_RATIO)
+        engine_input = [
+            {
+                "id": t.id,
+                "class": t.class_name,
+                "bbox": list(t.bbox),
+                "confidence": t.confidence,
+            }
+            for t in tracked_objects
+        ]
+        tracking_violations = _to_tracking_violations(v_engine.process_frame(engine_input, image, timestamp=0.0))
 
     if include_rule_engine:
         rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO)
@@ -168,6 +213,7 @@ def process_image(
         violations=violations,
         rule_engine_violations=rule_engine_violations,
         tracked_objects=tracked_objects,
+        tracking_violations=tracking_violations,
         summary=summary,
     )
 
@@ -177,6 +223,7 @@ def process_image_debug(
     file_name: str,
     include_rule_engine: bool = False,
     include_tracking: bool = False,
+    include_violation_engine: bool = False,
 ) -> DebugAnalysisResponse:
     image = cv2.imread(path)
     if image is None:
@@ -186,10 +233,28 @@ def process_image_debug(
     detections = detect_objects(image)
     rule_engine_violations: list[RuleEngineViolation] | None = None
     tracked_objects: list[TrackedObject] | None = None
+    tracking_violations: list[TrackingViolation] | None = None
 
     if include_tracking:
         reset_tracker()
         tracked_objects = _to_tracked_objects(track_objects(image, detections))
+
+    if include_violation_engine:
+        if tracked_objects is None:
+            reset_tracker()
+            tracked_objects = _to_tracked_objects(track_objects(image, detections))
+
+        v_engine = ViolationEngine(stop_line_ratio=STOP_LINE_Y_RATIO)
+        engine_input = [
+            {
+                "id": t.id,
+                "class": t.class_name,
+                "bbox": list(t.bbox),
+                "confidence": t.confidence,
+            }
+            for t in tracked_objects
+        ]
+        tracking_violations = _to_tracking_violations(v_engine.process_frame(engine_input, image, timestamp=0.0))
 
     if include_rule_engine:
         rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO)
@@ -219,6 +284,7 @@ def process_image_debug(
         violations=violations,
         rule_engine_violations=rule_engine_violations,
         tracked_objects=tracked_objects,
+        tracking_violations=tracking_violations,
         summary=summary,
         frame_detections=[
             FrameDetections(
@@ -226,6 +292,7 @@ def process_image_debug(
                 timestamp=0,
                 detections=_to_raw_detections(detections, w, h),
                 tracked_objects=tracked_objects,
+                tracking_violations=tracking_violations,
             )
         ],
     )
@@ -236,6 +303,7 @@ def process_video(
     file_name: str,
     include_rule_engine: bool = False,
     include_tracking: bool = False,
+    include_violation_engine: bool = False,
 ) -> AnalysisResponse:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -249,14 +317,16 @@ def process_video(
     duration = frame_count / fps if frame_count > 0 else None
 
     frame_index = 0
-    stride = 1 if include_tracking else max(1, int(round(fps / 5.0)))  # track per frame when enabled
+    stride = 1 if (include_tracking or include_violation_engine) else max(1, int(round(fps / 5.0)))
 
     violations = []
     rule_engine_violations: list[RuleEngineViolation] | None = [] if include_rule_engine else None
     rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO) if include_rule_engine else None
     tracked_objects: list[TrackedObject] | None = [] if include_tracking else None
+    tracking_violations: list[TrackingViolation] | None = [] if include_violation_engine else None
+    violation_engine = ViolationEngine(stop_line_ratio=STOP_LINE_Y_RATIO) if include_violation_engine else None
 
-    if include_tracking:
+    if include_tracking or include_violation_engine:
         reset_tracker()
 
     previous_vehicle_centers: dict[str, tuple[float, float]] = {}
@@ -273,9 +343,28 @@ def process_video(
         h, w = frame.shape[:2]
         detections = detect_objects(frame)
 
-        if tracked_objects is not None:
+        frame_tracks: list[TrackedObject] | None = None
+        if include_tracking or include_violation_engine:
             frame_tracks = _to_tracked_objects(track_objects(frame, detections))
-            tracked_objects = frame_tracks
+            if tracked_objects is not None:
+                tracked_objects = frame_tracks
+
+        if violation_engine is not None and tracking_violations is not None and frame_tracks is not None:
+            engine_input = [
+                {
+                    "id": t.id,
+                    "class": t.class_name,
+                    "bbox": list(t.bbox),
+                    "confidence": t.confidence,
+                }
+                for t in frame_tracks
+            ]
+            frame_tracking_violations = violation_engine.process_frame(
+                engine_input,
+                frame,
+                timestamp=frame_index / fps,
+            )
+            tracking_violations.extend(_to_tracking_violations(frame_tracking_violations))
 
         if rule_detector is not None and rule_engine_violations is not None:
             frame_rule_violations = rule_detector.detect_violations(detections, frame)
@@ -328,6 +417,7 @@ def process_video(
         violations=violations,
         rule_engine_violations=rule_engine_violations,
         tracked_objects=tracked_objects,
+        tracking_violations=tracking_violations,
         summary=summary,
     )
 
@@ -337,6 +427,7 @@ def process_video_debug(
     file_name: str,
     include_rule_engine: bool = False,
     include_tracking: bool = False,
+    include_violation_engine: bool = False,
 ) -> DebugAnalysisResponse:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -350,14 +441,16 @@ def process_video_debug(
     duration = frame_count / fps if frame_count > 0 else None
 
     frame_index = 0
-    stride = 1 if include_tracking else max(1, int(round(fps / 5.0)))
+    stride = 1 if (include_tracking or include_violation_engine) else max(1, int(round(fps / 5.0)))
 
     violations = []
     rule_engine_violations: list[RuleEngineViolation] | None = [] if include_rule_engine else None
     rule_detector = ViolationDetector(stop_line_ratio=STOP_LINE_Y_RATIO) if include_rule_engine else None
     tracked_objects: list[TrackedObject] | None = [] if include_tracking else None
+    tracking_violations: list[TrackingViolation] | None = [] if include_violation_engine else None
+    violation_engine = ViolationEngine(stop_line_ratio=STOP_LINE_Y_RATIO) if include_violation_engine else None
 
-    if include_tracking:
+    if include_tracking or include_violation_engine:
         reset_tracker()
 
     previous_vehicle_centers: dict[str, tuple[float, float]] = {}
@@ -376,9 +469,31 @@ def process_video_debug(
         detections = detect_objects(frame)
 
         frame_tracks: list[TrackedObject] | None = None
-        if include_tracking:
+        frame_tracking_violations: list[TrackingViolation] | None = None
+        if include_tracking or include_violation_engine:
             frame_tracks = _to_tracked_objects(track_objects(frame, detections))
-            tracked_objects = frame_tracks
+            if tracked_objects is not None:
+                tracked_objects = frame_tracks
+
+        if violation_engine is not None and frame_tracks is not None:
+            engine_input = [
+                {
+                    "id": t.id,
+                    "class": t.class_name,
+                    "bbox": list(t.bbox),
+                    "confidence": t.confidence,
+                }
+                for t in frame_tracks
+            ]
+            frame_tracking_violations = _to_tracking_violations(
+                violation_engine.process_frame(
+                    engine_input,
+                    frame,
+                    timestamp=frame_index / fps,
+                )
+            )
+            if tracking_violations is not None:
+                tracking_violations.extend(frame_tracking_violations)
 
         if rule_detector is not None and rule_engine_violations is not None:
             frame_rule_violations = rule_detector.detect_violations(detections, frame)
@@ -393,6 +508,7 @@ def process_video_debug(
                     timestamp=frame_index / fps,
                     detections=_to_raw_detections(detections, w, h),
                     tracked_objects=frame_tracks,
+                    tracking_violations=frame_tracking_violations,
                 )
             )
 
@@ -434,6 +550,7 @@ def process_video_debug(
         violations=violations,
         rule_engine_violations=rule_engine_violations,
         tracked_objects=tracked_objects,
+        tracking_violations=tracking_violations,
         summary=summary,
         frame_detections=frame_detections,
     )
