@@ -28,7 +28,7 @@ export const Route = createFileRoute("/results")({
 });
 
 type SortKey = "confidence" | "time";
-const MIN_CONFIDENCE = 0.8;
+const MIN_CONFIDENCE = Number(import.meta.env.VITE_MIN_CONFIDENCE ?? "0.6");
 const MAX_OVERLAY_BOXES = 18;
 
 function ResultsPage() {

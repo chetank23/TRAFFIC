@@ -7,8 +7,8 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from schemas import AnalysisResponse
-from utils import is_image_file, is_video_file, process_image, process_video
+from schemas import AnalysisResponse, DebugAnalysisResponse
+from utils import is_image_file, is_video_file, process_image, process_image_debug, process_video, process_video_debug
 
 
 app = FastAPI(title="Sentry Traffic AI API", version="1.0.0")
@@ -40,8 +40,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/upload", response_model=AnalysisResponse)
-async def upload_media(file: UploadFile = File(...)) -> AnalysisResponse:
+async def _validate_and_store_upload(file: UploadFile) -> tuple[str, str]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="File name is required")
 
@@ -57,10 +56,36 @@ async def upload_media(file: UploadFile = File(...)) -> AnalysisResponse:
         content = await file.read()
         tmp.write(content)
 
+    return temp_path, file.filename
+
+
+@app.post("/upload", response_model=AnalysisResponse)
+async def upload_media(file: UploadFile = File(...)) -> AnalysisResponse:
+    temp_path, original_name = await _validate_and_store_upload(file)
+
     try:
-        if is_video_file(file.filename):
-            return process_video(temp_path, file.filename)
-        return process_image(temp_path, file.filename)
+        if is_video_file(original_name):
+            return process_video(temp_path, original_name)
+        return process_image(temp_path, original_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+
+@app.post("/upload/debug", response_model=DebugAnalysisResponse)
+async def upload_media_debug(file: UploadFile = File(...)) -> DebugAnalysisResponse:
+    temp_path, original_name = await _validate_and_store_upload(file)
+
+    try:
+        if is_video_file(original_name):
+            return process_video_debug(temp_path, original_name)
+        return process_image_debug(temp_path, original_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import uuid
 from dataclasses import dataclass
 
@@ -36,7 +37,15 @@ VIOLATION_DESCRIPTIONS: dict[ViolationType, str] = {
     "dangerous_driving": "Aggressive or racing-like motion pattern detected.",
 }
 
-MIN_VIOLATION_CONFIDENCE = 0.80
+# Global post-filter applied to deduped violations.
+MIN_VIOLATION_CONFIDENCE = float(os.environ.get("MIN_VIOLATION_CONFIDENCE", "0.60"))
+
+# Heuristic gates used by no-helmet and rider association logic.
+HEURISTIC_MIN_TWO_WHEELER_AREA_RATIO = float(
+    os.environ.get("HEURISTIC_MIN_TWO_WHEELER_AREA_RATIO", "0.003")
+)
+HEURISTIC_MIN_VEHICLE_CONFIDENCE = float(os.environ.get("HEURISTIC_MIN_VEHICLE_CONFIDENCE", "0.55"))
+HEURISTIC_MIN_RIDER_CONFIDENCE = float(os.environ.get("HEURISTIC_MIN_RIDER_CONFIDENCE", "0.50"))
 
 VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle", "bicycle"}
 TWO_WHEELER_CLASSES = {"motorcycle", "bicycle"}
@@ -218,7 +227,10 @@ def detect_violations(detections: list[Detection], ctx: FrameContext) -> list[Vi
         # Skip tiny distant detections that tend to create noisy rider inferences.
         vx1, vy1, vx2, vy2 = vehicle.box_xyxy
         vehicle_area_ratio = ((vx2 - vx1) * (vy2 - vy1)) / max(1.0, ctx.frame_width * ctx.frame_height)
-        if vehicle_area_ratio < 0.01 or vehicle.confidence < 0.8:
+        if (
+            vehicle_area_ratio < HEURISTIC_MIN_TWO_WHEELER_AREA_RATIO
+            or vehicle.confidence < HEURISTIC_MIN_VEHICLE_CONFIDENCE
+        ):
             continue
 
         overlapping_riders = [r for r in riders if _box_iou(vehicle.box_xyxy, r.box_xyxy) > 0.15]
@@ -227,7 +239,7 @@ def detect_violations(detections: list[Detection], ctx: FrameContext) -> list[Vi
 
         # Use the strongest overlapping rider for stable head-region verification.
         rider = max(overlapping_riders, key=lambda r: _box_iou(vehicle.box_xyxy, r.box_xyxy))
-        if rider.confidence < 0.8:
+        if rider.confidence < HEURISTIC_MIN_RIDER_CONFIDENCE:
             continue
 
         head_box = _head_region(rider.box_xyxy)

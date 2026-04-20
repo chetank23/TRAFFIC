@@ -46,3 +46,20 @@ class AnalysisResponse(BaseModel):
     duration_seconds: float | None = Field(default=None, ge=0)
     violations: list[Violation]
     summary: AnalysisSummary
+
+
+class RawDetection(BaseModel):
+    class_id: int
+    class_name: str
+    confidence: float = Field(ge=0, le=1)
+    box: BoundingBox
+
+
+class FrameDetections(BaseModel):
+    frame_index: int = Field(ge=0)
+    timestamp: float = Field(ge=0)
+    detections: list[RawDetection]
+
+
+class DebugAnalysisResponse(AnalysisResponse):
+    frame_detections: list[FrameDetections]
