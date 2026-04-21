@@ -31,6 +31,9 @@ type SortKey = "confidence" | "time";
 const MIN_CONFIDENCE = Number(import.meta.env.VITE_MIN_CONFIDENCE ?? "0.6");
 const MAX_OVERLAY_BOXES = 18;
 const VIDEO_FRAME_SYNC_WINDOW_SEC = Number(import.meta.env.VITE_OVERLAY_SYNC_WINDOW_SEC ?? "0.24");
+const VIDEO_NEAREST_FALLBACK_WINDOW_SEC = Number(
+  import.meta.env.VITE_OVERLAY_NEAREST_FALLBACK_WINDOW_SEC ?? "1.2",
+);
 const MIN_RENDERABLE_BOX_SIDE = 0.01;
 const MIN_RENDERABLE_BOX_AREA = 0.0002;
 
@@ -79,6 +82,7 @@ function ResultsPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const [videoTime, setVideoTime] = useState(0);
+  const [autoSeekApplied, setAutoSeekApplied] = useState(false);
   const [overlayViewport, setOverlayViewport] = useState<OverlayViewport>({
     left: 0,
     top: 0,
@@ -125,23 +129,65 @@ function ResultsPage() {
     );
   }, [session?.isVideo]);
 
-  const overlayViolations = useMemo(() => {
+  const { overlayViolations, overlayMode } = useMemo(() => {
     const renderable = filtered.filter(isRenderableBox);
 
     if (session.isVideo) {
-      return renderable
+      const inFrame = renderable
         .filter((v) => v.timestamp != null && Math.abs(v.timestamp - videoTime) <= VIDEO_FRAME_SYNC_WINDOW_SEC)
         .slice(0, MAX_OVERLAY_BOXES);
+
+      if (inFrame.length > 0) {
+        return { overlayViolations: inFrame, overlayMode: "current" as const };
+      }
+
+      const withTimestamp = renderable.filter((v) => v.timestamp != null);
+      if (!withTimestamp.length) {
+        return { overlayViolations: [], overlayMode: "none" as const };
+      }
+
+      const closest = withTimestamp
+        .map((v) => ({ v, d: Math.abs((v.timestamp ?? 0) - videoTime) }))
+        .sort((a, b) => a.d - b.d)[0];
+
+      if (!closest || closest.d > VIDEO_NEAREST_FALLBACK_WINDOW_SEC) {
+        return { overlayViolations: [], overlayMode: "none" as const };
+      }
+
+      const nearest = withTimestamp
+        .filter((v) => Math.abs((v.timestamp ?? 0) - (closest.v.timestamp ?? 0)) <= VIDEO_FRAME_SYNC_WINDOW_SEC)
+        .slice(0, MAX_OVERLAY_BOXES);
+      return { overlayViolations: nearest, overlayMode: "nearest" as const };
     }
 
     const top = renderable.slice(0, MAX_OVERLAY_BOXES);
-    if (!activeId) return top;
+    if (!activeId) return { overlayViolations: top, overlayMode: "current" as const };
     const active = renderable.find((v) => v.id === activeId);
-    if (!active) return top;
-    return top.some((v) => v.id === active.id)
-      ? top
-      : [active, ...top.slice(0, MAX_OVERLAY_BOXES - 1)];
+    if (!active) return { overlayViolations: top, overlayMode: "current" as const };
+    return {
+      overlayViolations: top.some((v) => v.id === active.id)
+        ? top
+        : [active, ...top.slice(0, MAX_OVERLAY_BOXES - 1)],
+      overlayMode: "current" as const,
+    };
   }, [filtered, activeId, session.isVideo, videoTime]);
+
+  useEffect(() => {
+    if (!session?.isVideo) return;
+    if (autoSeekApplied) return;
+    const firstTimed = filtered.find((v) => v.timestamp != null);
+    if (!firstTimed || !videoRef.current) return;
+
+    const targetTs = firstTimed.timestamp ?? 0;
+    videoRef.current.currentTime = targetTs;
+    setVideoTime(targetTs);
+    setAutoSeekApplied(true);
+  }, [session?.isVideo, filtered, autoSeekApplied]);
+
+  useEffect(() => {
+    if (!session?.isVideo) return;
+    setAutoSeekApplied(false);
+  }, [session?.fileUrl, session?.isVideo]);
 
   useEffect(() => {
     const container = mediaRef.current;
@@ -309,7 +355,12 @@ function ResultsPage() {
               {/* HUD */}
               <div className="absolute top-3 left-3 flex items-center gap-2 rounded-md bg-black/50 backdrop-blur px-2.5 py-1 text-[10px] font-mono text-white/80">
                 <span className="h-1.5 w-1.5 rounded-full bg-violation animate-pulse" />
-                ANNOTATED · showing {overlayViolations.length} {session.isVideo ? "at current frame" : `of ${filtered.length}`}
+                ANNOTATED · showing {overlayViolations.length}{" "}
+                {session.isVideo
+                  ? overlayMode === "nearest"
+                    ? "at nearest detected frame"
+                    : "at current frame"
+                  : `of ${filtered.length}`}
               </div>
             </div>
           </div>

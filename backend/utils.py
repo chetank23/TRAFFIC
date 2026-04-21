@@ -30,6 +30,7 @@ STOP_LINE_Y_RATIO = float(os.environ.get("STOP_LINE_Y_RATIO", "0.62"))
 STOP_LINE_BAND_RATIO = float(os.environ.get("STOP_LINE_BAND_RATIO", "0.06"))
 DEBUG_MAX_FRAMES = int(os.environ.get("DEBUG_MAX_FRAMES", "12"))
 DEBUG_MAX_DETECTIONS_PER_FRAME = int(os.environ.get("DEBUG_MAX_DETECTIONS_PER_FRAME", "40"))
+VIDEO_MIN_VIOLATION_CONFIDENCE = float(os.environ.get("VIDEO_MIN_VIOLATION_CONFIDENCE", "0.65"))
 
 
 def is_video_file(path: str) -> bool:
@@ -421,8 +422,8 @@ def process_video(
     # Keep strongest violations and sort by timestamp.
     violations.sort(key=lambda v: (v.timestamp if v.timestamp is not None else 1e9, -v.confidence))
 
-    # Only keep high-confidence violations.
-    violations = [v for v in violations if v.confidence >= 0.80]
+    # Keep sufficiently strong video violations while avoiding over-pruning.
+    violations = [v for v in violations if v.confidence >= VIDEO_MIN_VIOLATION_CONFIDENCE]
 
     # Optional cap to keep payload reasonable.
     violations = violations[:60]
@@ -564,7 +565,7 @@ def process_video_debug(
     cap.release()
 
     violations.sort(key=lambda v: (v.timestamp if v.timestamp is not None else 1e9, -v.confidence))
-    violations = [v for v in violations if v.confidence >= 0.80]
+    violations = [v for v in violations if v.confidence >= VIDEO_MIN_VIOLATION_CONFIDENCE]
     violations = violations[:60]
 
     summary = _build_summary(
