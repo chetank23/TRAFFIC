@@ -136,3 +136,44 @@ def test_detects_drunk_driving_from_alcohol_overlap_cue():
 
     violations = detect_violations(detections, ctx)
     assert any(v.type == "drunk_driving" for v in violations)
+
+
+def test_detects_wrong_lane_from_opposite_flow_in_outer_corridor():
+    detections = [
+        Detection(2, "car", 0.9, (70, 230, 210, 390)),
+        Detection(2, "car", 0.91, (360, 220, 520, 390)),
+    ]
+    ctx = FrameContext(
+        frame_width=640,
+        frame_height=480,
+        timestamp=2.0,
+        previous_vehicle_centers={
+            "car-0": (120, 300),   # current center 140 => +20 (right)
+            "car-1": (420, 300),   # current center 440 => +20 (right)
+        },
+    )
+
+    # Invert one vehicle's previous center to simulate opposite movement.
+    ctx.previous_vehicle_centers["car-0"] = (180, 300)  # current center 140 => -40 (left)
+
+    violations = detect_violations(detections, ctx)
+    assert any(v.type == "wrong_lane" for v in violations)
+
+
+def test_does_not_flag_wrong_lane_for_normal_flow_in_outer_corridor():
+    detections = [
+        Detection(2, "car", 0.9, (70, 230, 210, 390)),
+        Detection(2, "car", 0.91, (360, 220, 520, 390)),
+    ]
+    ctx = FrameContext(
+        frame_width=640,
+        frame_height=480,
+        timestamp=2.0,
+        previous_vehicle_centers={
+            "car-0": (120, 300),   # current center 140 => +20
+            "car-1": (420, 300),   # current center 440 => +20
+        },
+    )
+
+    violations = detect_violations(detections, ctx)
+    assert not any(v.type == "wrong_lane" for v in violations)

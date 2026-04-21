@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ArrowLeft,
@@ -30,6 +30,44 @@ export const Route = createFileRoute("/results")({
 type SortKey = "confidence" | "time";
 const MIN_CONFIDENCE = Number(import.meta.env.VITE_MIN_CONFIDENCE ?? "0.6");
 const MAX_OVERLAY_BOXES = 18;
+const VIDEO_FRAME_SYNC_WINDOW_SEC = Number(import.meta.env.VITE_OVERLAY_SYNC_WINDOW_SEC ?? "0.24");
+const MIN_RENDERABLE_BOX_SIDE = 0.01;
+const MIN_RENDERABLE_BOX_AREA = 0.0002;
+
+type OverlayViewport = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+function isRenderableBox(v: Violation): boolean {
+  if (v.box.w < MIN_RENDERABLE_BOX_SIDE || v.box.h < MIN_RENDERABLE_BOX_SIDE) {
+    return false;
+  }
+  return v.box.w * v.box.h >= MIN_RENDERABLE_BOX_AREA;
+}
+
+function getContainedViewport(
+  containerWidth: number,
+  containerHeight: number,
+  mediaWidth: number,
+  mediaHeight: number,
+): OverlayViewport {
+  if (mediaWidth <= 0 || mediaHeight <= 0 || containerWidth <= 0 || containerHeight <= 0) {
+    return { left: 0, top: 0, width: containerWidth, height: containerHeight };
+  }
+
+  const scale = Math.min(containerWidth / mediaWidth, containerHeight / mediaHeight);
+  const width = mediaWidth * scale;
+  const height = mediaHeight * scale;
+  return {
+    left: (containerWidth - width) / 2,
+    top: (containerHeight - height) / 2,
+    width,
+    height,
+  };
+}
 
 function ResultsPage() {
   const navigate = useNavigate();
@@ -39,6 +77,14 @@ function ResultsPage() {
   const [sortKey, setSortKey] = useState<SortKey>("confidence");
   const mediaRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const [videoTime, setVideoTime] = useState(0);
+  const [overlayViewport, setOverlayViewport] = useState<OverlayViewport>({
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+  });
 
   useEffect(() => {
     if (!session) navigate({ to: "/upload" });
@@ -54,15 +100,66 @@ function ResultsPage() {
     return v;
   }, [session, filterTypes, sortKey]);
 
+  const recomputeOverlayViewport = useCallback(() => {
+    const container = mediaRef.current;
+    if (!container) return;
+
+    const containerWidth = container.clientWidth;
+    const containerHeight = container.clientHeight;
+
+    if (session?.isVideo) {
+      const video = videoRef.current;
+      const videoWidth = video?.videoWidth ?? 0;
+      const videoHeight = video?.videoHeight ?? 0;
+      setOverlayViewport(
+        getContainedViewport(containerWidth, containerHeight, videoWidth, videoHeight),
+      );
+      return;
+    }
+
+    const image = imageRef.current;
+    const imageWidth = image?.naturalWidth ?? 0;
+    const imageHeight = image?.naturalHeight ?? 0;
+    setOverlayViewport(
+      getContainedViewport(containerWidth, containerHeight, imageWidth, imageHeight),
+    );
+  }, [session?.isVideo]);
+
   const overlayViolations = useMemo(() => {
-    const top = filtered.slice(0, MAX_OVERLAY_BOXES);
+    const renderable = filtered.filter(isRenderableBox);
+
+    if (session.isVideo) {
+      return renderable
+        .filter((v) => v.timestamp != null && Math.abs(v.timestamp - videoTime) <= VIDEO_FRAME_SYNC_WINDOW_SEC)
+        .slice(0, MAX_OVERLAY_BOXES);
+    }
+
+    const top = renderable.slice(0, MAX_OVERLAY_BOXES);
     if (!activeId) return top;
-    const active = filtered.find((v) => v.id === activeId);
+    const active = renderable.find((v) => v.id === activeId);
     if (!active) return top;
     return top.some((v) => v.id === active.id)
       ? top
       : [active, ...top.slice(0, MAX_OVERLAY_BOXES - 1)];
-  }, [filtered, activeId]);
+  }, [filtered, activeId, session.isVideo, videoTime]);
+
+  useEffect(() => {
+    const container = mediaRef.current;
+    if (!container) return;
+
+    recomputeOverlayViewport();
+
+    const observer = new ResizeObserver(() => {
+      recomputeOverlayViewport();
+    });
+    observer.observe(container);
+
+    window.addEventListener("resize", recomputeOverlayViewport);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", recomputeOverlayViewport);
+    };
+  }, [recomputeOverlayViewport]);
 
   useEffect(() => {
     if (!filtered.length) {
@@ -91,6 +188,7 @@ function ResultsPage() {
     setActiveId(v.id);
     if (session.isVideo && videoRef.current && v.timestamp != null) {
       videoRef.current.currentTime = v.timestamp;
+      setVideoTime(v.timestamp);
       videoRef.current.pause();
     }
   };
@@ -164,12 +262,20 @@ function ResultsPage() {
                     ref={videoRef}
                     src={session.fileUrl}
                     controls
+                    onLoadedMetadata={() => {
+                      setVideoTime(videoRef.current?.currentTime ?? 0);
+                      recomputeOverlayViewport();
+                    }}
+                    onTimeUpdate={() => setVideoTime(videoRef.current?.currentTime ?? 0)}
+                    onSeeked={() => setVideoTime(videoRef.current?.currentTime ?? 0)}
                     className="absolute inset-0 h-full w-full object-contain"
                   />
                 ) : (
                   <img
+                    ref={imageRef}
                     src={session.fileUrl}
                     alt="analysed"
+                    onLoad={recomputeOverlayViewport}
                     className="absolute inset-0 h-full w-full object-contain"
                   />
                 )
@@ -181,7 +287,15 @@ function ResultsPage() {
               )}
 
               {/* Bounding boxes overlay */}
-              <div className="absolute inset-0 pointer-events-none">
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  left: `${overlayViewport.left}px`,
+                  top: `${overlayViewport.top}px`,
+                  width: `${overlayViewport.width}px`,
+                  height: `${overlayViewport.height}px`,
+                }}
+              >
                 {overlayViolations.map((v) => (
                   <BoundingBox
                     key={v.id}
@@ -195,7 +309,7 @@ function ResultsPage() {
               {/* HUD */}
               <div className="absolute top-3 left-3 flex items-center gap-2 rounded-md bg-black/50 backdrop-blur px-2.5 py-1 text-[10px] font-mono text-white/80">
                 <span className="h-1.5 w-1.5 rounded-full bg-violation animate-pulse" />
-                ANNOTATED · showing {overlayViolations.length} of {filtered.length}
+                ANNOTATED · showing {overlayViolations.length} {session.isVideo ? "at current frame" : `of ${filtered.length}`}
               </div>
             </div>
           </div>

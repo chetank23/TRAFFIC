@@ -61,6 +61,15 @@ NO_PARKING_CLASSES = {"no_parking", "illegal_parking", "parking_violation", "roa
 DANGEROUS_DRIVING_CLASSES = {"dangerous_driving", "rash_driving", "racing", "stunt_driving"}
 ALCOHOL_CUE_CLASSES = {"wine glass", "bottle", "beer bottle"}
 
+WRONG_LANE_EDGE_BAND_RATIO = float(os.environ.get("WRONG_LANE_EDGE_BAND_RATIO", "0.14"))
+WRONG_LANE_OUTER_CORRIDOR_RATIO = float(os.environ.get("WRONG_LANE_OUTER_CORRIDOR_RATIO", "0.34"))
+WRONG_LANE_FALLBACK_EDGE_RATIO = float(os.environ.get("WRONG_LANE_FALLBACK_EDGE_RATIO", "0.08"))
+WRONG_LANE_MIN_MOTION_X_RATIO = float(os.environ.get("WRONG_LANE_MIN_MOTION_X_RATIO", "0.02"))
+WRONG_LANE_MIN_MOTION_Y_RATIO = float(os.environ.get("WRONG_LANE_MIN_MOTION_Y_RATIO", "0.02"))
+WRONG_LANE_MIN_MIDLINE_CROSS_RATIO = float(os.environ.get("WRONG_LANE_MIN_MIDLINE_CROSS_RATIO", "0.12"))
+WRONG_LANE_MIN_Y_RATIO = float(os.environ.get("WRONG_LANE_MIN_Y_RATIO", "0.35"))
+WRONG_LANE_MIN_AREA_RATIO = float(os.environ.get("WRONG_LANE_MIN_AREA_RATIO", "0.0025"))
+
 
 @dataclass
 class FrameContext:
@@ -165,6 +174,66 @@ def _new_violation(
         vehicle_id=vehicle_id,
         description=VIOLATION_DESCRIPTIONS[violation_type],
     )
+
+
+def _movement_sign(delta: float, threshold: float) -> int:
+    if delta > threshold:
+        return 1
+    if delta < -threshold:
+        return -1
+    return 0
+
+
+def _dominant_axis_sign(vectors: list[tuple[float, float]], min_motion_x: float, min_motion_y: float) -> tuple[str | None, int]:
+    if not vectors:
+        return (None, 0)
+
+    sum_dx = sum(dx for dx, _ in vectors)
+    sum_dy = sum(dy for _, dy in vectors)
+
+    if abs(sum_dx) < min_motion_x and abs(sum_dy) < min_motion_y:
+        return (None, 0)
+
+    if abs(sum_dx) >= abs(sum_dy):
+        return ("x", _movement_sign(sum_dx, min_motion_x))
+    return ("y", _movement_sign(sum_dy, min_motion_y))
+
+
+def _match_previous_vehicle_centers(
+    vehicles: list[Detection],
+    previous_vehicle_centers: dict[str, tuple[float, float]],
+) -> dict[int, tuple[float, float]]:
+    grouped_previous: dict[str, list[tuple[float, float]]] = {}
+    for key, center in previous_vehicle_centers.items():
+        class_name = key.rsplit("-", 1)[0]
+        grouped_previous.setdefault(class_name, []).append((float(center[0]), float(center[1])))
+
+    matched: dict[int, tuple[float, float]] = {}
+    used_per_class: dict[str, set[int]] = {}
+
+    for idx, vehicle in enumerate(vehicles):
+        candidates = grouped_previous.get(vehicle.class_name, [])
+        if not candidates:
+            continue
+
+        used = used_per_class.setdefault(vehicle.class_name, set())
+        cx, cy = _box_center(vehicle.box_xyxy)
+
+        best_j = -1
+        best_dist = float("inf")
+        for j, (px, py) in enumerate(candidates):
+            if j in used:
+                continue
+            dist = math.dist((cx, cy), (px, py))
+            if dist < best_dist:
+                best_dist = dist
+                best_j = j
+
+        if best_j >= 0:
+            used.add(best_j)
+            matched[idx] = candidates[best_j]
+
+    return matched
 
 
 def detect_violations(detections: list[Detection], ctx: FrameContext) -> list[Violation]:
@@ -306,12 +375,15 @@ def detect_violations(detections: list[Detection], ctx: FrameContext) -> list[Vi
         if near_alcohol:
             violations.append(_new_violation("drunk_driving", person, ctx, confidence_boost=-0.02))
 
+    matched_previous_centers: dict[int, tuple[float, float]] = {}
+    if ctx.previous_vehicle_centers:
+        matched_previous_centers = _match_previous_vehicle_centers(vehicles, ctx.previous_vehicle_centers)
+
     # Red light + zebra/stop-line crossing rule.
     if red_light_present:
         for idx, vehicle in enumerate(vehicles):
             _, cy = _box_center(vehicle.box_xyxy)
-            key = f"{vehicle.class_name}-{idx}"
-            prev_center = ctx.previous_vehicle_centers.get(key) if ctx.previous_vehicle_centers else None
+            prev_center = matched_previous_centers.get(idx)
 
             crossed_line = False
             if prev_center is not None:
@@ -330,26 +402,117 @@ def detect_violations(detections: list[Detection], ctx: FrameContext) -> list[Vi
                     )
                 )
 
-    # Wrong lane fallback: vehicle significantly in extreme left/right regions.
-    for vehicle in vehicles:
-        cx, _ = _box_center(vehicle.box_xyxy)
-        if cx < ctx.frame_width * 0.16 or cx > ctx.frame_width * 0.84:
+    # Wrong lane heuristic: favor motion-aware opposite-flow/lane-crossing checks,
+    # and use a strict edge-only fallback when temporal context is unavailable.
+    lane_center_x = ctx.frame_width * 0.5
+    min_motion_x = ctx.frame_width * max(0.005, WRONG_LANE_MIN_MOTION_X_RATIO)
+    min_motion_y = ctx.frame_height * max(0.005, WRONG_LANE_MIN_MOTION_Y_RATIO)
+    min_midline_cross = ctx.frame_width * max(0.03, WRONG_LANE_MIN_MIDLINE_CROSS_RATIO)
+
+    vehicle_motion_by_idx: dict[int, tuple[float, float]] = {}
+    global_vectors: list[tuple[float, float]] = []
+    side_vectors: dict[str, list[tuple[float, float]]] = {"left": [], "right": []}
+    for idx, vehicle in enumerate(vehicles):
+        prev_center = matched_previous_centers.get(idx)
+        if prev_center is None:
+            continue
+        cx, cy = _box_center(vehicle.box_xyxy)
+        dx = cx - prev_center[0]
+        dy = cy - prev_center[1]
+        vehicle_motion_by_idx[idx] = (dx, dy)
+        if abs(dx) >= min_motion_x or abs(dy) >= min_motion_y:
+            global_vectors.append((dx, dy))
+            side = "left" if cx < lane_center_x else "right"
+            side_vectors[side].append((dx, dy))
+
+    global_axis, global_sign = _dominant_axis_sign(global_vectors, min_motion_x, min_motion_y)
+    side_axis_sign = {
+        side: _dominant_axis_sign(vectors, min_motion_x, min_motion_y)
+        for side, vectors in side_vectors.items()
+    }
+
+    for idx, vehicle in enumerate(vehicles):
+        x1, y1, x2, y2 = vehicle.box_xyxy
+        cx, cy = _box_center(vehicle.box_xyxy)
+        vehicle_area_ratio = ((x2 - x1) * (y2 - y1)) / max(1.0, ctx.frame_width * ctx.frame_height)
+
+        # Ignore tiny / horizon detections that are too noisy for lane semantics.
+        if vehicle_area_ratio < WRONG_LANE_MIN_AREA_RATIO or cy < ctx.frame_height * WRONG_LANE_MIN_Y_RATIO:
+            continue
+
+        motion = vehicle_motion_by_idx.get(idx)
+
+        if motion is not None:
+            dx, _ = motion
+            dy = motion[1]
+            in_outer_corridor = (
+                cx < ctx.frame_width * WRONG_LANE_OUTER_CORRIDOR_RATIO
+                or cx > ctx.frame_width * (1.0 - WRONG_LANE_OUTER_CORRIDOR_RATIO)
+            )
+
+            side = "left" if cx < lane_center_x else "right"
+            active_axis, active_sign = side_axis_sign.get(side, (None, 0))
+            if len(side_vectors.get(side, [])) < 2 or active_sign == 0:
+                active_axis, active_sign = global_axis, global_sign
+
+            if active_axis == "x":
+                move_sign = _movement_sign(dx, min_motion_x)
+            elif active_axis == "y":
+                move_sign = _movement_sign(dy, min_motion_y)
+            else:
+                move_sign = 0
+
+            opposite_flow = active_sign != 0 and move_sign != 0 and move_sign != active_sign
+
+            prev_center = matched_previous_centers.get(idx)
+            crossed_midline = False
+            moved_deeper_edge = False
+            if prev_center is not None:
+                prev_x, _ = prev_center
+                crossed_midline = (
+                    (prev_x - lane_center_x) * (cx - lane_center_x) < 0
+                    and abs(cx - prev_x) >= min_midline_cross
+                )
+                moved_deeper_edge = (
+                    (cx < ctx.frame_width * WRONG_LANE_EDGE_BAND_RATIO and cx < prev_x - min_motion_x)
+                    or (
+                        cx > ctx.frame_width * (1.0 - WRONG_LANE_EDGE_BAND_RATIO)
+                        and cx > prev_x + min_motion_x
+                    )
+                )
+
+            if (opposite_flow and in_outer_corridor) or crossed_midline or moved_deeper_edge:
+                violations.append(
+                    _new_violation(
+                        "wrong_lane",
+                        vehicle,
+                        ctx,
+                        confidence_boost=-0.06,
+                        vehicle_id=vehicle_ids.get(id(vehicle)),
+                    )
+                )
+                continue
+
+        # Fallback for single-frame conditions.
+        if (
+            cx < ctx.frame_width * WRONG_LANE_FALLBACK_EDGE_RATIO
+            or cx > ctx.frame_width * (1.0 - WRONG_LANE_FALLBACK_EDGE_RATIO)
+        ):
             violations.append(
                 _new_violation(
                     "wrong_lane",
                     vehicle,
                     ctx,
-                    confidence_boost=-0.12,
+                    confidence_boost=-0.18,
                     vehicle_id=vehicle_ids.get(id(vehicle)),
                 )
             )
 
     # Overspeeding: significant frame-to-frame displacement of the same indexed vehicle.
-    overspeed_keys: set[str] = set()
-    if ctx.previous_vehicle_centers:
+    overspeed_indices: set[int] = set()
+    if matched_previous_centers:
         for idx, vehicle in enumerate(vehicles):
-            key = f"{vehicle.class_name}-{idx}"
-            prev_center = ctx.previous_vehicle_centers.get(key)
+            prev_center = matched_previous_centers.get(idx)
             if prev_center is None:
                 continue
 
@@ -359,7 +522,7 @@ def detect_violations(detections: list[Detection], ctx: FrameContext) -> list[Vi
             normalized_disp = dist / max(frame_diag, 1)
 
             if normalized_disp > 0.11:
-                overspeed_keys.add(key)
+                overspeed_indices.add(idx)
                 violations.append(
                     _new_violation(
                         "overspeeding",
@@ -390,8 +553,7 @@ def detect_violations(detections: list[Detection], ctx: FrameContext) -> list[Vi
 
     # Dangerous driving / racing heuristic from high displacement combined with risky trajectory.
     for idx, vehicle in enumerate(vehicles):
-        key = f"{vehicle.class_name}-{idx}"
-        if key not in overspeed_keys:
+        if idx not in overspeed_indices:
             continue
         cx, _ = _box_center(vehicle.box_xyxy)
         risky_lane_position = cx < ctx.frame_width * 0.16 or cx > ctx.frame_width * 0.84
